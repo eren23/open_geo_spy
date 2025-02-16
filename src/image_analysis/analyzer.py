@@ -45,6 +45,38 @@ class ImageAnalyzer:
         location_analysis = self._analyze_location_features(image, text_features)
         features = self._parse_analysis(location_analysis, text_features)
 
+        # Add time analysis
+        time_analysis = self._estimate_time_of_day(cv_image, {})
+        features["time_analysis"] = time_analysis
+
+        if time_analysis.get("estimated_hour"):
+            # Format time as HH:MM, ensuring consistent decimal places
+            hour = int(time_analysis["estimated_hour"])
+            minute = int((time_analysis["estimated_hour"] % 1) * 60)
+            features["time_of_day"] = f"{hour:02d}:{minute:02d}"
+        else:
+            features["time_of_day"] = time_analysis["time_of_day"]
+
+        # Update prompt with time information
+        prompt = f"""
+        I'm showing you a section of a larger image (coordinates: {coords}).
+        Focus on finding and reading any text in this section.
+        Look for:
+        1. Signs and labels
+        2. Street names
+        3. Building numbers
+        4. Business names
+        5. Any other text
+
+        List all text you can read, with confidence levels (0-1).
+        Format: "Text: [text] (confidence: [0-1])"
+
+        Time Analysis:
+        - Time of Day: {features['time_of_day']}
+        - Period: {time_analysis.get('period', 'unknown')}
+        - Confidence: {time_analysis['confidence']:.2f}
+        """
+
         return features, f"{combined_text}\n\n{location_analysis}"
 
     def _create_image_chunks(self, image: np.ndarray) -> List[Tuple[np.ndarray, Tuple[int, int, int, int]]]:
@@ -270,3 +302,110 @@ class ImageAnalyzer:
                 features["geographic_features"].append(line.split(":", 1)[1].strip())
 
         return features
+
+    def _analyze_shadows(self, cv_image: np.ndarray) -> Dict[str, float]:
+        """Analyze shadows to estimate time of day"""
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+
+            # Apply threshold to separate shadows
+            _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY)
+
+            # Find contours of shadows
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if not contours:
+                return {"time_confidence": 0.0, "estimated_hour": None}
+
+            # Find the longest shadow
+            longest_shadow = max(contours, key=cv2.contourArea)
+
+            # Get the orientation of the shadow
+            rect = cv2.minAreaRect(longest_shadow)
+            angle = rect[2]
+
+            # Normalize angle to 0-360 range
+            angle = angle % 360
+            if angle < 0:
+                angle += 360
+
+            # Calculate shadow length ratio
+            shadow_length = max(rect[1])
+            object_height = min(rect[1])
+            if object_height == 0:
+                return {"time_confidence": 0.0, "estimated_hour": None}
+
+            length_ratio = shadow_length / object_height
+
+            # Estimate time based on shadow angle and length
+            # Morning: shadows point west (270°)
+            # Noon: shortest shadows
+            # Evening: shadows point east (90°)
+
+            if 225 <= angle <= 315:  # Morning
+                estimated_hour = 7 + (length_ratio - 3) / 0.5  # Rough mapping of length to hour
+            elif 45 <= angle <= 135:  # Evening
+                estimated_hour = 17 + (length_ratio - 3) / 0.5
+            else:  # Mid-day
+                estimated_hour = 12 + (length_ratio - 1) * 2
+
+            # Constrain to reasonable daylight hours
+            estimated_hour = max(6, min(20, estimated_hour))
+
+            # Calculate confidence based on shadow clarity
+            shadow_area = cv2.contourArea(longest_shadow)
+            image_area = cv_image.shape[0] * cv_image.shape[1]
+            shadow_clarity = shadow_area / image_area
+
+            confidence = min(1.0, shadow_clarity * 5)  # Scale up but cap at 1.0
+
+            return {"time_confidence": confidence, "estimated_hour": round(estimated_hour, 1), "shadow_angle": angle, "shadow_length_ratio": length_ratio}
+
+        except Exception as e:
+            print(f"Error analyzing shadows: {e}")
+            return {"time_confidence": 0.0, "estimated_hour": None}
+
+    def _estimate_time_of_day(self, cv_image: np.ndarray, metadata: Dict) -> Dict:
+        """Estimate time of day using multiple methods"""
+        # Get shadow-based estimate
+        shadow_estimate = self._analyze_shadows(cv_image)
+
+        # Get brightness-based estimate
+        brightness = cv2.mean(cv_image)[0] / 255.0  # Normalize to 0-1
+
+        # Time ranges based on brightness
+        # Dawn: 0.2-0.4
+        # Day: 0.4-0.8
+        # Dusk: 0.2-0.4
+        # Night: 0-0.2
+
+        time_ranges = {(0.0, 0.2): "night", (0.2, 0.4): "dawn/dusk", (0.4, 0.8): "day", (0.8, 1.0): "bright day"}
+
+        time_of_day = next((label for (low, high), label in time_ranges.items() if low <= brightness <= high), "unknown")
+
+        # Combine estimates
+        result = {
+            "time_of_day": time_of_day,
+            "brightness": brightness,
+            "shadow_analysis": shadow_estimate,
+            "confidence": max(0.3, (shadow_estimate["time_confidence"] + 0.7 * brightness) / 2),
+        }
+
+        # Add specific hour if available
+        if shadow_estimate["estimated_hour"] is not None:
+            result["estimated_hour"] = shadow_estimate["estimated_hour"]
+
+        # Add time period
+        if shadow_estimate["estimated_hour"] is not None:
+            hour = shadow_estimate["estimated_hour"]
+            if 5 <= hour < 12:
+                result["period"] = "morning"
+            elif 12 <= hour < 17:
+                result["period"] = "afternoon"
+            elif 17 <= hour < 21:
+                result["period"] = "evening"
+            else:
+                result["period"] = "night"
+
+        return result
