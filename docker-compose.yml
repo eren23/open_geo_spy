@@ -1,0 +1,29 @@
+name: geolocator
+
+services:
+  geolocator:
+    build: .
+    container_name: geolocator
+    volumes:
+      - ./src:/app/src:ro        # Mount source code read-only
+      - ./images:/app/images     # Mount images directory
+      - ./.env:/app/.env:ro      # Mount env file read-only
+    environment:
+      - PYTHONUNBUFFERED=1   # Ensure Python output is sent to container logs
+    ports:
+      - "8000:8000"          # If you add a web interface later
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    # Enable development mode
+    develop:
+      watch:
+        - action: sync
+          path: ./src
+          target: /app/src
+          ignore:
+            - "**/__pycache__"
+            - "**/*.pyc"

@@ -1,0 +1,14 @@
+openai
+requests
+pillow
+overpy>=0.6
+python-dotenv
+numpy
+fastapi
+uvicorn
+python-multipart
+aiofiles
+piexif
+scikit-learn
+opencv-python
+googlesearch-python 
