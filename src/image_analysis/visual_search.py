@@ -64,14 +64,34 @@ class VisualSearchEngine:
 
         return {"base64": base64_image, "bytes": img_bytes, "size": image.size}
 
-    def _get_search_area(self, location: Dict) -> Dict:
-        """Calculate search area based on initial location"""
-        lat, lon = location["lat"], location["lon"]
-        return {
-            "center": (lat, lon),
-            "radius": 5000,  # 5km radius
-            "bounds": {"north": lat + 0.045, "south": lat - 0.045, "east": lon + 0.045, "west": lon - 0.045},  # Roughly 5km in degrees
-        }
+    def _get_search_area(self, location: Dict) -> Optional[Dict]:
+        """Get search area from location"""
+        if not location or not isinstance(location, dict):
+            return None
+
+        try:
+            lat = float(location.get("lat", 0))
+            lon = float(location.get("lon", 0))
+
+            # Validate coordinates
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                print(f"Invalid coordinates: lat={lat}, lon={lon}")
+                return None
+
+            # Create search area with validated coordinates
+            return {
+                "center": (lat, lon),
+                "radius": 5000,  # 5km radius
+                "bounds": {
+                    "north": str(min(90, lat + 0.045)),
+                    "south": str(max(-90, lat - 0.045)),
+                    "east": str(min(180, lon + 0.045)),
+                    "west": str(max(-180, lon - 0.045)),
+                },
+            }
+        except (ValueError, TypeError) as e:
+            print(f"Error creating search area: {str(e)}")
+            return None
 
     def _search_google_images(self, image_data: Dict, search_area: Dict = None) -> List[Dict]:
         """Search Google for similar images"""
@@ -225,96 +245,117 @@ class VisualSearchEngine:
 
     def _search_osm_images(self, image_data: Dict, search_area: Dict = None) -> List[Dict]:
         """Search OpenStreetMap for images and locations"""
+        if not search_area or not isinstance(search_area, dict):
+            print("Invalid or missing search area")
+            return []
+
         try:
-            if not search_area:
+            # Validate and extract coordinates
+            bounds = search_area.get("bounds", {})
+            if not isinstance(bounds, dict) or not all(k in bounds for k in ["south", "west", "north", "east"]):
+                print("Missing or invalid bounds in search area")
                 return []
 
-            # Build OSM query for images in the area
-            # Convert coordinates to proper format and ensure they're valid
+            # Convert coordinates to strings and validate
             try:
-                south = float(search_area["bounds"]["south"])
-                west = float(search_area["bounds"]["west"])
-                north = float(search_area["bounds"]["north"])
-                east = float(search_area["bounds"]["east"])
-            except (KeyError, ValueError, TypeError):
-                print("Invalid search area coordinates")
+                coords = {}
+                for key in ["south", "west", "north", "east"]:
+                    value = bounds.get(key)
+                    if value is None:
+                        print(f"Missing {key} coordinate")
+                        return []
+                    try:
+                        float_val = float(value)
+                        if key in ["south", "north"] and not -90 <= float_val <= 90:
+                            print(f"Invalid {key} coordinate: {float_val}")
+                            return []
+                        if key in ["east", "west"] and not -180 <= float_val <= 180:
+                            print(f"Invalid {key} coordinate: {float_val}")
+                            return []
+                        coords[key] = str(float_val)
+                    except (ValueError, TypeError):
+                        print(f"Invalid {key} coordinate value: {value}")
+                        return []
+            except Exception as e:
+                print(f"Error validating coordinates: {str(e)}")
                 return []
 
-            # Validate coordinate ranges
-            if not (-90 <= south <= 90 and -90 <= north <= 90 and -180 <= west <= 180 and -180 <= east <= 180):
-                print("Coordinates out of valid range")
+            # Build the query using string formatting
+            try:
+                query = """
+                [out:json][timeout:25];
+                (
+                  way["image"]({south},{west},{north},{east});
+                  node["image"]({south},{west},{north},{east});
+                  relation["image"]({south},{west},{north},{east});
+                );
+                out body;
+                >;
+                out skel qt;
+                """.format(
+                    **coords
+                )
+            except Exception as e:
+                print(f"Error formatting query: {str(e)}")
                 return []
-
-            # Build the query using proper Overpass QL syntax with explicit string formatting
-            query = """
-            [out:json][timeout:25];
-            (
-              way[image]({south},{west},{north},{east});
-              node[image]({south},{west},{north},{east});
-              relation[image]({south},{west},{north},{east});
-            );
-            out body;
-            >;
-            out skel qt;
-            """.format(
-                south=south, west=west, north=north, east=east
-            )
 
             results = []
             try:
                 response = self.osm_api.query(query)
 
                 # Process ways with images
-                for way in response.ways:
-                    if way.tags.get("image") and way.nodes:
-                        try:
-                            # Calculate center point of way
-                            valid_nodes = [n for n in way.nodes if hasattr(n, "lat") and hasattr(n, "lon")]
-                            if valid_nodes:
-                                lat = sum(n.lat for n in valid_nodes) / len(valid_nodes)
-                                lon = sum(n.lon for n in valid_nodes) / len(valid_nodes)
+                if hasattr(response, "ways"):
+                    for way in response.ways:
+                        if hasattr(way, "tags") and way.tags.get("image") and way.nodes:
+                            try:
+                                # Calculate center point of way
+                                valid_nodes = [n for n in way.nodes if hasattr(n, "lat") and hasattr(n, "lon")]
+                                if valid_nodes:
+                                    lat = sum(float(n.lat) for n in valid_nodes) / len(valid_nodes)
+                                    lon = sum(float(n.lon) for n in valid_nodes) / len(valid_nodes)
 
+                                    results.append(
+                                        {
+                                            "source": "osm",
+                                            "url": way.tags.get("image"),
+                                            "title": way.tags.get("name", "Unknown location"),
+                                            "lat": lat,
+                                            "lon": lon,
+                                            "similarity_score": 0.7,
+                                            "type": "osm_location",
+                                            "osm_type": "way",
+                                            "osm_id": way.id,
+                                            "metadata": {"tags": dict(way.tags), "nodes_count": len(valid_nodes)},
+                                        }
+                                    )
+                            except Exception as e:
+                                print(f"Error processing way {way.id}: {str(e)}")
+                                continue
+
+                # Process nodes with images
+                if hasattr(response, "nodes"):
+                    for node in response.nodes:
+                        if hasattr(node, "tags") and node.tags.get("image"):
+                            try:
                                 results.append(
                                     {
                                         "source": "osm",
-                                        "url": way.tags.get("image"),
-                                        "title": way.tags.get("name", "Unknown location"),
-                                        "lat": lat,
-                                        "lon": lon,
+                                        "url": node.tags.get("image"),
+                                        "title": node.tags.get("name", "Unknown location"),
+                                        "lat": float(node.lat),
+                                        "lon": float(node.lon),
                                         "similarity_score": 0.7,
                                         "type": "osm_location",
-                                        "osm_type": "way",
-                                        "osm_id": way.id,
-                                        "metadata": {"tags": dict(way.tags), "nodes_count": len(valid_nodes)},
+                                        "osm_type": "node",
+                                        "osm_id": node.id,
+                                        "metadata": {"tags": dict(node.tags)},
                                     }
                                 )
-                        except Exception as e:
-                            print(f"Error processing way {way.id}: {e}")
-                            continue
+                            except Exception as e:
+                                print(f"Error processing node {node.id}: {str(e)}")
+                                continue
 
-                # Process nodes with images
-                for node in response.nodes:
-                    if node.tags.get("image"):
-                        try:
-                            results.append(
-                                {
-                                    "source": "osm",
-                                    "url": node.tags.get("image"),
-                                    "title": node.tags.get("name", "Unknown location"),
-                                    "lat": float(node.lat),
-                                    "lon": float(node.lon),
-                                    "similarity_score": 0.7,
-                                    "type": "osm_location",
-                                    "osm_type": "node",
-                                    "osm_id": node.id,
-                                    "metadata": {"tags": dict(node.tags)},
-                                }
-                            )
-                        except Exception as e:
-                            print(f"Error processing node {node.id}: {e}")
-                            continue
-
-                # Build POI query with explicit string formatting
+                # Search for nearby POIs
                 poi_query = """
                 [out:json][timeout:25];
                 (
@@ -326,34 +367,35 @@ class VisualSearchEngine:
                 >;
                 out skel qt;
                 """.format(
-                    south=south, west=west, north=north, east=east
+                    **coords
                 )
 
                 try:
                     poi_response = self.osm_api.query(poi_query)
 
-                    # Process POIs
-                    for node in poi_response.nodes:
-                        if hasattr(node, "lat") and hasattr(node, "lon"):
-                            try:
-                                poi_type = next((k for k in ["tourism", "historic", "landmark"] if k in node.tags), "unknown")
-                                results.append(
-                                    {
-                                        "source": "osm",
-                                        "url": node.tags.get("image", ""),
-                                        "title": node.tags.get("name", "Unknown POI"),
-                                        "lat": float(node.lat),
-                                        "lon": float(node.lon),
-                                        "similarity_score": 0.5,
-                                        "type": "osm_poi",
-                                        "osm_type": "node",
-                                        "osm_id": node.id,
-                                        "metadata": {"tags": dict(node.tags), "type": poi_type},
-                                    }
-                                )
-                            except Exception as e:
-                                print(f"Error processing POI {node.id}: {e}")
-                                continue
+                    if hasattr(poi_response, "nodes"):
+                        for node in poi_response.nodes:
+                            if hasattr(node, "lat") and hasattr(node, "lon") and hasattr(node, "tags"):
+                                try:
+                                    poi_type = next((k for k in ["tourism", "historic", "landmark"] if k in node.tags), "unknown")
+
+                                    results.append(
+                                        {
+                                            "source": "osm",
+                                            "url": node.tags.get("image", ""),
+                                            "title": node.tags.get("name", "Unknown POI"),
+                                            "lat": float(node.lat),
+                                            "lon": float(node.lon),
+                                            "similarity_score": 0.5,
+                                            "type": "osm_poi",
+                                            "osm_type": "node",
+                                            "osm_id": node.id,
+                                            "metadata": {"tags": dict(node.tags), "type": poi_type},
+                                        }
+                                    )
+                                except Exception as e:
+                                    print(f"Error processing POI {node.id}: {str(e)}")
+                                    continue
 
                 except overpy.exception.OverpassGatewayTimeout:
                     print("POI query timeout, skipping POIs")
@@ -367,14 +409,16 @@ class VisualSearchEngine:
 
             except overpy.exception.OverpassGatewayTimeout:
                 print("OSM gateway timeout, trying with smaller area...")
+                # Try with a smaller search area
+                center = search_area.get("center", [0, 0])
                 smaller_area = {
-                    "center": search_area["center"],
-                    "radius": search_area["radius"] / 2,
+                    "center": center,
+                    "radius": search_area.get("radius", 5000) / 2,
                     "bounds": {
-                        "north": (north + float(search_area["center"][0])) / 2,
-                        "south": (south + float(search_area["center"][0])) / 2,
-                        "east": (east + float(search_area["center"][1])) / 2,
-                        "west": (west + float(search_area["center"][1])) / 2,
+                        "north": (float(coords["north"]) + float(center[0])) / 2,
+                        "south": (float(coords["south"]) + float(center[0])) / 2,
+                        "east": (float(coords["east"]) + float(center[1])) / 2,
+                        "west": (float(coords["west"]) + float(center[1])) / 2,
                     },
                 }
                 return self._search_osm_images(image_data, smaller_area)
