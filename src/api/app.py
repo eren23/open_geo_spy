@@ -45,9 +45,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @app.post("/api/locate")
-async def locate_image(image: UploadFile, save_image: Optional[bool] = False) -> dict:
+async def locate_image(image: UploadFile, save_image: Optional[bool] = False, location: Optional[str] = None) -> dict:
     """
     Upload an image and get its predicted location
+    Optional location parameter can be used to narrow down the search area
     """
     if not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -66,8 +67,8 @@ async def locate_image(image: UploadFile, save_image: Optional[bool] = False) ->
 
         # Process the image
         features, description = image_analyzer.analyze_image(file_path)
-        candidates = geo_interface.search_location_candidates(features)
-        final_location = location_resolver.resolve_location(features, candidates, description)
+        candidates = geo_interface.search_location_candidates(features, location)
+        final_location = location_resolver.resolve_location(features, candidates, description, location)
 
         # Clean up if not saving
         if not save_image:
@@ -95,9 +96,10 @@ async def health_check():
 
 
 @app.post("/api/analyze-multimodal")
-async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Optional[bool] = Form(False)) -> dict:
+async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Optional[bool] = Form(False), location: Optional[str] = Form(None)) -> dict:
     """
     Analyze multiple media files (images/videos) to extract location information
+    Optional location parameter can be used to narrow down the search area
     """
     try:
         # Create temporary files for the uploads
@@ -196,8 +198,8 @@ async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Op
                 features["time_of_day"] = section.split("\n")[1].split("[")[0].strip("* ")
 
         # Use existing pipeline to find location
-        candidates = geo_interface.search_location_candidates(features)
-        final_location = location_resolver.resolve_location(features, candidates, analysis_text)
+        candidates = geo_interface.search_location_candidates(features, location)
+        final_location = location_resolver.resolve_location(features, candidates, analysis_text, location)
 
         # Save files if requested
         saved_files = []

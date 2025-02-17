@@ -7,9 +7,9 @@ class LocationResolver:
     def __init__(self, llm_api_key: str):
         self.client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=llm_api_key)
 
-    def resolve_location(self, image_features: Dict, location_candidates: List[Dict], image_description: str) -> Dict:
+    def resolve_location(self, image_features: Dict, location_candidates: List[Dict], image_description: str, location_hint: str = None) -> Dict:
         """Use LLM to reason about the most likely location"""
-        prompt = self._build_reasoning_prompt(image_features, location_candidates, image_description)
+        prompt = self._build_reasoning_prompt(image_features, location_candidates, image_description, location_hint)
 
         # Call LLM API
         completion = self.client.chat.completions.create(model="google/gemini-2.0-flash-001", messages=[{"role": "user", "content": prompt}])
@@ -18,12 +18,13 @@ class LocationResolver:
         response = completion.choices[0].message.content
         return self._parse_llm_response(response, location_candidates)
 
-    def _build_reasoning_prompt(self, features: Dict, candidates: List[Dict], description: str) -> str:
+    def _build_reasoning_prompt(self, features: Dict, candidates: List[Dict], description: str, location_hint: str = None) -> str:
         """Build prompt for the LLM"""
         candidates_text = self._format_candidates(candidates)
+        location_context = f"\nProvided Location Context: {location_hint}" if location_hint else ""
 
         return f"""
-        Given an image with the following description and features, determine the most likely location.
+        Given an image with the following description and features, determine the most likely location.{location_context}
 
         Image Description: {description}
         
@@ -38,7 +39,10 @@ class LocationResolver:
         Potential Locations:
         {candidates_text}
         
-        Analyze the evidence and determine the most likely location. Return your response in this format:
+        Analyze the evidence and determine the most likely location.
+        If a location context was provided, give higher confidence to matches within or near that area.
+        
+        Return your response in this format:
         Location: [name]
         Coordinates: [lat], [lon]
         Confidence: [0-1]
