@@ -11,4 +11,5 @@ CONFIG = {
     "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
     "BING_API_KEY": os.getenv("BING_API_KEY"),
     "GOOGLE_SEARCH_CX": os.getenv("GOOGLE_SEARCH_CX"),  # Custom Search Engine ID
+    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
 }

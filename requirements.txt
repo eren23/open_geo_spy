@@ -1,6 +1,6 @@
 openai
 requests
-pillow
+pillow>=10.0.0
 overpy>=0.6
 python-dotenv
 numpy
@@ -11,4 +11,5 @@ aiofiles
 piexif
 scikit-learn
 opencv-python
-googlesearch-python 
+googlesearch-python
+google-generativeai>=0.3.0
