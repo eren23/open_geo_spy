@@ -16,7 +16,12 @@ class VisualSearchEngine:
         self.google_api_key = google_api_key
         self.bing_api_key = bing_api_key
         self.osm_api = overpy.Overpass()
-        self.search_apis = {"google": self._search_google_images, "duckduckgo": self._search_duckduckgo, "osm": self._search_osm_images}
+        self.search_apis = {
+            "google": self._search_google_images,
+            "duckduckgo": self._search_duckduckgo,
+            "osm": self._search_osm_images,
+            "business": self._search_business_locations,
+        }
 
     async def find_similar_locations(self, image_path: str, initial_location: Dict = None) -> List[Dict]:
         """Find visually similar locations using multiple search engines"""
@@ -45,6 +50,12 @@ class VisualSearchEngine:
         # Deduplicate and rank results
         unique_results = self._deduplicate_results(results)
         ranked_results = self._rank_results(unique_results, initial_location)
+
+        # Verify business locations if available
+        if initial_location:
+            verified_results = self._verify_business_locations(ranked_results, initial_location)
+            if verified_results:
+                ranked_results = verified_results
 
         return ranked_results
 
@@ -641,3 +652,207 @@ class VisualSearchEngine:
         distance = R * c
 
         return distance
+
+    def _search_business_locations(self, image_data: Dict, search_area: Dict = None) -> List[Dict]:
+        """Search for specific businesses and landmarks"""
+        if not search_area:
+            return []
+
+        try:
+            # Extract business names from image text
+            business_names = self._extract_business_names(image_data)
+            if not business_names:
+                return []
+
+            results = []
+            for business in business_names:
+                # Search Google Places API
+                if self.google_api_key:
+                    places_results = self._search_google_places(business, search_area)
+                    results.extend(places_results)
+
+                # Search OpenStreetMap for businesses
+                osm_results = self._search_osm_businesses(business, search_area)
+                results.extend(osm_results)
+
+                # Search local business directories
+                local_results = self._search_local_directories(business, search_area)
+                results.extend(local_results)
+
+            return results
+        except Exception as e:
+            print(f"Error searching business locations: {e}")
+            return []
+
+    def _search_google_places(self, business_name: str, search_area: Dict) -> List[Dict]:
+        """Search Google Places API for business locations"""
+        try:
+            url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+            location = f"{search_area['center'][0]},{search_area['center'][1]}"
+            radius = min(5000, search_area.get("radius", 5000))  # Max 5km radius
+
+            params = {"query": business_name, "location": location, "radius": radius, "key": self.google_api_key}
+
+            response = requests.get(url, params=params)
+            data = response.json()
+
+            results = []
+            for place in data.get("results", []):
+                results.append(
+                    {
+                        "source": "google_places",
+                        "name": place["name"],
+                        "lat": place["geometry"]["location"]["lat"],
+                        "lon": place["geometry"]["location"]["lng"],
+                        "type": "business",
+                        "confidence": 0.9 if business_name.lower() in place["name"].lower() else 0.7,
+                        "metadata": {"address": place.get("formatted_address"), "place_id": place["place_id"], "types": place.get("types", [])},
+                    }
+                )
+
+            return results
+        except Exception as e:
+            print(f"Error searching Google Places: {e}")
+            return []
+
+    def _search_osm_businesses(self, business_name: str, search_area: Dict) -> List[Dict]:
+        """Search OpenStreetMap for businesses"""
+        try:
+            query = f"""
+            [out:json][timeout:25];
+            (
+              node["name"~"{business_name}",i]
+                ({search_area['bbox']['south']},{search_area['bbox']['west']},
+                 {search_area['bbox']['north']},{search_area['bbox']['east']});
+              way["name"~"{business_name}",i]
+                ({search_area['bbox']['south']},{search_area['bbox']['west']},
+                 {search_area['bbox']['north']},{search_area['bbox']['east']});
+              relation["name"~"{business_name}",i]
+                ({search_area['bbox']['south']},{search_area['bbox']['west']},
+                 {search_area['bbox']['north']},{search_area['bbox']['east']});
+            );
+            out body;
+            >;
+            out skel qt;
+            """
+
+            results = []
+            response = self.osm_api.query(query)
+
+            for node in response.nodes:
+                results.append(
+                    {
+                        "source": "osm",
+                        "name": node.tags.get("name", business_name),
+                        "lat": float(node.lat),
+                        "lon": float(node.lon),
+                        "type": "business",
+                        "confidence": 0.8 if business_name.lower() in node.tags.get("name", "").lower() else 0.6,
+                        "metadata": {"osm_id": node.id, "tags": dict(node.tags)},
+                    }
+                )
+
+            return results
+        except Exception as e:
+            print(f"Error searching OSM businesses: {e}")
+            return []
+
+    def _search_local_directories(self, business_name: str, search_area: Dict) -> List[Dict]:
+        """Search local business directories"""
+        try:
+            # Implement searches for:
+            # - Yelp API
+            # - Yellow Pages
+            # - Local chamber of commerce
+            # - Regional business directories
+            return []  # Placeholder for future implementation
+        except Exception as e:
+            print(f"Error searching local directories: {e}")
+            return []
+
+    def _verify_business_locations(self, results: List[Dict], initial_location: Dict) -> List[Dict]:
+        """Verify and refine business locations"""
+        verified_results = []
+
+        for result in results:
+            try:
+                # Skip if not a business result
+                if result.get("type") != "business":
+                    verified_results.append(result)
+                    continue
+
+                # Get additional business details
+                if result["source"] == "google_places" and self.google_api_key:
+                    details = self._get_google_place_details(result["metadata"]["place_id"])
+                    if details:
+                        result["metadata"].update(details)
+                        result["confidence"] = min(1.0, result["confidence"] + 0.1)
+
+                # Verify with street view if available
+                if self.google_api_key:
+                    has_streetview = self._check_street_view(result["lat"], result["lon"])
+                    if has_streetview:
+                        result["confidence"] = min(1.0, result["confidence"] + 0.1)
+
+                # Cross-reference with other sources
+                if self._cross_reference_location(result, initial_location):
+                    result["confidence"] = min(1.0, result["confidence"] + 0.1)
+
+                verified_results.append(result)
+            except Exception as e:
+                print(f"Error verifying result: {e}")
+                verified_results.append(result)
+
+        return verified_results
+
+    def _get_google_place_details(self, place_id: str) -> Optional[Dict]:
+        """Get detailed information about a place from Google Places API"""
+        try:
+            url = "https://maps.googleapis.com/maps/api/place/details/json"
+            params = {"place_id": place_id, "fields": "name,formatted_address,formatted_phone_number,website,opening_hours,photos", "key": self.google_api_key}
+
+            response = requests.get(url, params=params)
+            data = response.json()
+
+            if data.get("result"):
+                return {
+                    "full_address": data["result"].get("formatted_address"),
+                    "phone": data["result"].get("formatted_phone_number"),
+                    "website": data["result"].get("website"),
+                    "hours": data["result"].get("opening_hours", {}).get("weekday_text", []),
+                    "has_photos": bool(data["result"].get("photos", [])),
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting place details: {e}")
+            return None
+
+    def _check_street_view(self, lat: float, lon: float) -> bool:
+        """Check if Street View imagery is available for location"""
+        try:
+            url = "https://maps.googleapis.com/maps/api/streetview/metadata"
+            params = {"location": f"{lat},{lon}", "key": self.google_api_key}
+
+            response = requests.get(url, params=params)
+            data = response.json()
+
+            return data.get("status") == "OK"
+        except Exception:
+            return False
+
+    def _cross_reference_location(self, result: Dict, initial_location: Dict) -> bool:
+        """Cross-reference location with other data sources"""
+        try:
+            # Check if location is within expected area
+            if initial_location:
+                distance = self._calculate_distance((result["lat"], result["lon"]), (initial_location["lat"], initial_location["lon"]))
+                if distance > 5000:  # More than 5km away
+                    return False
+
+            # Implement additional cross-referencing:
+            # - Check against government databases
+            # - Verify with business registration records
+            # - Compare with map data
+            return True
+        except Exception:
+            return False

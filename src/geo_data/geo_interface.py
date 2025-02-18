@@ -10,6 +10,7 @@ class GeoDataInterface:
         self.geonames_username = geonames_username
 
     def search_location_candidates(self, features: Dict, location: str = None) -> List[Dict]:
+        """Search for location candidates using multiple data sources"""
         candidates = []
 
         # If location is provided, get its coordinates first
@@ -17,20 +18,34 @@ class GeoDataInterface:
         if location and self.geonames_username:
             initial_coords = self._get_location_coordinates(location)
 
-        # Search OpenStreetMap
+        # 1. Search OpenStreetMap
         osm_results = self._search_osm(features, initial_coords)
         candidates.extend(osm_results)
 
-        # Search GeoNames if credentials provided
+        # 2. Search GeoNames if credentials provided
         if self.geonames_username:
             geonames_results = self._search_geonames(features, initial_coords)
             candidates.extend(geonames_results)
 
-        # Search Wikidata for landmarks
+        # 3. Search Wikidata for landmarks
         wikidata_results = self._search_wikidata(features, initial_coords)
         candidates.extend(wikidata_results)
 
-        return self._deduplicate_candidates(candidates)
+        # 4. Search for specific businesses
+        business_results = self._search_businesses(features, initial_coords)
+        candidates.extend(business_results)
+
+        # 5. Search for transportation infrastructure
+        transport_results = self._search_transport_infrastructure(features, initial_coords)
+        candidates.extend(transport_results)
+
+        # 6. Search for cultural landmarks
+        cultural_results = self._search_cultural_landmarks(features, initial_coords)
+        candidates.extend(cultural_results)
+
+        # Deduplicate and rank results
+        candidates = self._deduplicate_candidates(candidates)
+        return self._rank_candidates(candidates, features, initial_coords)
 
     def _get_location_coordinates(self, location: str) -> Optional[Dict]:
         """Get coordinates for a location string using GeoNames"""
@@ -207,6 +222,258 @@ class GeoDataInterface:
             print(f"Wikidata search error: {e}")
             return []
 
+    def _search_businesses(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
+        """Search for specific businesses mentioned in features"""
+        results = []
+        business_names = features.get("extracted_text", {}).get("business_names", [])
+
+        if not business_names:
+            return results
+
+        try:
+            for business in business_names:
+                # Search OSM for businesses
+                query = f"""
+                [out:json][timeout:25];
+                (
+                  node["name"~"{business}",i]
+                    ({initial_coords['bbox']['south'] if initial_coords else -90},
+                     {initial_coords['bbox']['west'] if initial_coords else -180},
+                     {initial_coords['bbox']['north'] if initial_coords else 90},
+                     {initial_coords['bbox']['east'] if initial_coords else 180});
+                  way["name"~"{business}",i]
+                    ({initial_coords['bbox']['south'] if initial_coords else -90},
+                     {initial_coords['bbox']['west'] if initial_coords else -180},
+                     {initial_coords['bbox']['north'] if initial_coords else 90},
+                     {initial_coords['bbox']['east'] if initial_coords else 180});
+                );
+                out body;
+                >;
+                out skel qt;
+                """
+
+                response = self.osm_api.query(query)
+
+                for element in response.nodes:
+                    results.append(
+                        {
+                            "source": "osm_business",
+                            "name": element.tags.get("name", business),
+                            "lat": float(element.lat),
+                            "lon": float(element.lon),
+                            "type": "business",
+                            "confidence": 0.8 if business.lower() in element.tags.get("name", "").lower() else 0.6,
+                            "metadata": {
+                                "osm_id": element.id,
+                                "tags": dict(element.tags),
+                                "business_type": element.tags.get("shop") or element.tags.get("amenity"),
+                            },
+                        }
+                    )
+
+            return results
+        except Exception as e:
+            print(f"Error searching businesses: {e}")
+            return []
+
+    def _search_transport_infrastructure(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
+        """Search for transportation infrastructure like tram lines, stations, etc."""
+        results = []
+
+        try:
+            # Build area bounds
+            area_bounds = (
+                f"({initial_coords['bbox']['south']},{initial_coords['bbox']['west']}," f"{initial_coords['bbox']['north']},{initial_coords['bbox']['east']})"
+                if initial_coords
+                else "(-90,-180,90,180)"
+            )
+
+            # Only search for transport features mentioned in the image
+            transport_types = []
+            for feature in features.get("geographic_features", []):
+                feature_lower = str(feature).lower()
+                if "tram" in feature_lower:
+                    transport_types.extend(["tram", "tram_stop"])
+                if "bus" in feature_lower:
+                    transport_types.extend(["bus_stop", "bus_station"])
+                if "train" in feature_lower or "railway" in feature_lower:
+                    transport_types.extend(["station", "railway"])
+                if "subway" in feature_lower or "metro" in feature_lower:
+                    transport_types.extend(["subway", "subway_entrance"])
+
+            if not transport_types:
+                return []
+
+            # Build optimized query with shorter timeout
+            query = f"""
+            [out:json][timeout:10];
+            (
+              // Transport nodes
+              node["railway"~"{"|".join(transport_types)}",i]{area_bounds};
+              node["public_transport"~"{"|".join(transport_types)}",i]{area_bounds};
+              
+              // Transport ways (for routes)
+              way["railway"~"{"|".join(transport_types)}",i]{area_bounds};
+            );
+            out body;
+            >;
+            out skel qt;
+            """
+
+            response = self.osm_api.query(query)
+
+            for element in response.nodes:
+                transport_type = element.tags.get("railway") or element.tags.get("public_transport") or "transport"
+
+                confidence = 0.7  # Base confidence
+
+                # Boost confidence for exact matches
+                if any(t_type in element.tags.get("railway", "").lower() for t_type in transport_types):
+                    confidence = min(0.9, confidence + 0.2)
+
+                results.append(
+                    {
+                        "source": "osm_transport",
+                        "name": element.tags.get("name", f"{transport_type.title()} Stop"),
+                        "lat": float(element.lat),
+                        "lon": float(element.lon),
+                        "type": "transport",
+                        "confidence": confidence,
+                        "metadata": {"osm_id": element.id, "tags": dict(element.tags), "transport_type": transport_type},
+                    }
+                )
+
+            return results
+        except Exception as e:
+            print(f"Error searching transport infrastructure: {e}")
+            return []
+
+    def _search_cultural_landmarks(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
+        """Search for cultural landmarks and points of interest"""
+        results = []
+
+        try:
+            # Build area bounds
+            area_bounds = (
+                f"({initial_coords['bbox']['south']},{initial_coords['bbox']['west']}," f"{initial_coords['bbox']['north']},{initial_coords['bbox']['east']})"
+                if initial_coords
+                else "(-90,-180,90,180)"
+            )
+
+            # Build style filter safely
+            style_filter = ""
+            if features.get("architecture_style"):
+                safe_style = features["architecture_style"].replace('"', '\\"')
+                style_filter = f'["architecture"~"{safe_style}",i]'
+
+            # Build query with separate filters for historic and tourism
+            query = f"""
+            [out:json][timeout:15];
+            (
+              // Historic sites
+              way["historic"]{style_filter}{area_bounds};
+              node["historic"]{style_filter}{area_bounds};
+              
+              // Tourism landmarks
+              way["tourism"]["historic"]{style_filter}{area_bounds};
+              node["tourism"]["historic"]{style_filter}{area_bounds};
+            );
+            out body;
+            >;
+            out skel qt;
+            """
+
+            response = self.osm_api.query(query)
+
+            for element in response.nodes:
+                confidence = 0.6  # Base confidence
+
+                # Boost confidence based on matches
+                if features.get("architecture_style"):
+                    if features["architecture_style"].lower() in element.tags.get("architecture", "").lower():
+                        confidence = min(0.9, confidence + 0.3)
+
+                if any(landmark.lower() in element.tags.get("name", "").lower() for landmark in features.get("landmarks", [])):
+                    confidence = min(0.9, confidence + 0.2)
+
+                results.append(
+                    {
+                        "source": "osm_cultural",
+                        "name": element.tags.get("name", "Cultural Site"),
+                        "lat": float(element.lat),
+                        "lon": float(element.lon),
+                        "type": "cultural",
+                        "confidence": confidence,
+                        "metadata": {
+                            "osm_id": element.id,
+                            "tags": dict(element.tags),
+                            "historic_type": element.tags.get("historic"),
+                            "tourism_type": element.tags.get("tourism"),
+                        },
+                    }
+                )
+
+            return results
+        except Exception as e:
+            print(f"Error searching cultural landmarks: {e}")
+            return []
+
+    def _rank_candidates(self, candidates: List[Dict], features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
+        """Rank candidates based on multiple factors"""
+        for candidate in candidates:
+            score = candidate.get("confidence", 0.5)  # Start with base confidence
+
+            # Boost score based on feature matches
+            if features.get("architecture_style") and candidate.get("metadata", {}).get("tags", {}).get("architecture") == features["architecture_style"]:
+                score += 0.2
+
+            # Boost score for business name matches
+            if candidate["type"] == "business" and any(
+                business.lower() in candidate["name"].lower() for business in features.get("extracted_text", {}).get("business_names", [])
+            ):
+                score += 0.3
+
+            # Boost score for transport infrastructure matches
+            if candidate["type"] == "transport" and any("tram" in feature.lower() for feature in features.get("geographic_features", [])):
+                score += 0.2
+
+            # Boost score for cultural landmark matches
+            if candidate["type"] == "cultural" and any(landmark.lower() in candidate["name"].lower() for landmark in features.get("landmarks", [])):
+                score += 0.2
+
+            # Boost score for proximity to initial location
+            if initial_coords:
+                distance = self._calculate_distance(
+                    (float(candidate["lat"]), float(candidate["lon"])), (float(initial_coords["lat"]), float(initial_coords["lon"]))
+                )
+                if distance < 1000:  # Within 1km
+                    score += 0.3
+                elif distance < 5000:  # Within 5km
+                    score += 0.1
+
+            candidate["confidence"] = min(1.0, score)
+
+        # Sort by confidence
+        return sorted(candidates, key=lambda x: x["confidence"], reverse=True)
+
+    def _calculate_distance(self, point1: tuple, point2: tuple) -> float:
+        """Calculate distance between two points in meters"""
+        from math import sin, cos, sqrt, atan2, radians
+
+        R = 6371000  # Earth radius in meters
+
+        lat1, lon1 = map(radians, point1)
+        lat2, lon2 = map(radians, point2)
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        a = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        distance = R * c
+
+        return distance
+
     def _deduplicate_candidates(self, candidates: List[Dict]) -> List[Dict]:
         """Remove duplicate locations based on proximity and name similarity"""
         unique_candidates = []
@@ -242,6 +509,47 @@ class GeoDataInterface:
 
         return min(score, 1.0)
 
-    def _build_osm_query(self, features, initial_coords: Optional[Dict] = None):
-        # Convert features to OSM query
-        pass
+    def _build_osm_query(self, features: Dict, initial_coords: Optional[Dict] = None) -> str:
+        """Build OSM query based on features and location constraints"""
+        # Build area constraints
+        area_bounds = (
+            f"({initial_coords['bbox']['south']},{initial_coords['bbox']['west']}," f"{initial_coords['bbox']['north']},{initial_coords['bbox']['east']})"
+            if initial_coords
+            else "(-90,-180,90,180)"
+        )
+
+        # Build feature filters
+        filters = []
+
+        # Add architectural style filter if present
+        if features.get("architecture_style"):
+            style = features["architecture_style"].replace('"', '\\"')  # Escape quotes
+            filters.append(f'["architecture"~"{style}",i]')
+
+        # Add landmark filters
+        for landmark in features.get("landmarks", []):
+            safe_landmark = landmark.replace('"', '\\"')  # Escape quotes
+            filters.append(f'["name"~"{safe_landmark}",i]')
+
+        # Add business name filters
+        for business in features.get("extracted_text", {}).get("business_names", []):
+            safe_business = business.replace('"', '\\"')  # Escape quotes
+            filters.append(f'["name"~"{safe_business}",i]')
+
+        # Combine filters
+        filter_str = "".join(filters) if filters else ""
+
+        # Build complete query with reasonable timeout
+        query = f"""
+        [out:json][timeout:15];
+        (
+          node{filter_str}{area_bounds};
+          way{filter_str}{area_bounds};
+          relation{filter_str}{area_bounds};
+        );
+        out body;
+        >;
+        out skel qt;
+        """
+
+        return query
