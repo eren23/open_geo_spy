@@ -1,46 +1,41 @@
-from image_analysis.analyzer import ImageAnalyzer
-from image_analysis.metadata_extractor import MetadataExtractor
+from image_analysis import ImageAnalyzer, MetadataExtractor
 from image_analysis.visual_search import VisualSearchEngine
-from geo_data.geo_interface import GeoDataInterface
-from reasoning.location_resolver import LocationResolver
+from geo_data import GeoDataInterface
+from reasoning import LocationResolver
 from config import CONFIG
 import os
 
 
 class GeoLocator:
     def __init__(self):
-        self.image_analyzer = ImageAnalyzer(CONFIG["openrouter_api_key"], CONFIG["app_name"], CONFIG["app_url"])
         self.metadata_extractor = MetadataExtractor()
-        self.visual_search = VisualSearchEngine(google_api_key=CONFIG.get("GOOGLE_API_KEY"), bing_api_key=CONFIG.get("BING_API_KEY"))
-        self.geo_interface = GeoDataInterface(geonames_username=CONFIG["geonames_username"])
-        self.location_resolver = LocationResolver(CONFIG["openrouter_api_key"])
+        self.image_analyzer = ImageAnalyzer(CONFIG.OPENROUTER_API_KEY, CONFIG.APP_NAME, CONFIG.APP_URL)
+        self.visual_search = VisualSearchEngine(google_api_key=CONFIG.GOOGLE_API_KEY, bing_api_key=CONFIG.BING_API_KEY)
+        self.geo_interface = GeoDataInterface(geonames_username=CONFIG.GEONAMES_USERNAME)
+        self.location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
 
-    async def locate_image(self, image_path: str):
-        # 1. Extract metadata
+    async def process_image(self, image_path: str):
+        """Full processing pipeline for an image"""
         metadata = self.metadata_extractor.extract_metadata(image_path)
-        initial_location = None
-        if metadata.get("exif", {}).get("gps_coordinates"):
-            initial_location = {"lat": metadata["exif"]["gps_coordinates"][0], "lon": metadata["exif"]["gps_coordinates"][1]}
+        initial_location = self._get_initial_location(metadata)
 
-        # 2. Analyze image
         features, description = self.image_analyzer.analyze_image(image_path)
+        candidates = await self._get_location_candidates(features, initial_location)
 
-        # 3. Search for candidate locations
+        return self.location_resolver.resolve_location(features=features, candidates=candidates, description=description, metadata=metadata)
+
+    def _get_initial_location(self, metadata: dict) -> dict:
+        """Extract initial location from metadata"""
+        if metadata.get("exif", {}).get("gps_coordinates"):
+            lat, lon = metadata["exif"]["gps_coordinates"]
+            return {"lat": lat, "lon": lon}
+        return None
+
+    async def _get_location_candidates(self, features: dict, initial_location: dict) -> list:
+        """Get combined location candidates"""
         candidates = self.geo_interface.search_location_candidates(features)
-
-        # 4. Find visually similar locations
-        visual_matches = await self.visual_search.find_similar_locations(image_path, initial_location)
-
-        # Combine candidates with visual matches
-        candidates.extend(visual_matches)
-
-        # 5. Reason about most likely location
-        final_location = self.location_resolver.resolve_location(features, candidates, description, metadata=metadata)
-
-        return {
-            "location": final_location,
-            "analysis": {"features": features, "description": description, "candidates": candidates, "metadata": metadata, "visual_matches": visual_matches},
-        }
+        visual_matches = await self.visual_search.find_similar_locations(features, initial_location)
+        return candidates + visual_matches
 
 
 def process_images_in_directory(directory: str = "/app/images"):
@@ -66,14 +61,14 @@ def process_images_in_directory(directory: str = "/app/images"):
         print(f"\nProcessing image: {image_file}")
 
         try:
-            result = locator.locate_image(image_path)
+            result = locator.process_image(image_path)
 
             print("Predicted Location:")
-            print(f"Name: {result['location']['name']}")
-            print(f"Coordinates: {result['location']['lat']}, {result['location']['lon']}")
-            print(f"Confidence: {result['location']['confidence']}")
+            print(f"Name: {result['name']}")
+            print(f"Coordinates: {result['lat']}, {result['lon']}")
+            print(f"Confidence: {result['confidence']}")
             print("\nAnalysis:")
-            print(result["analysis"]["description"])
+            print(result["analysis"])
 
         except Exception as e:
             print(f"Error processing {image_file}: {str(e)}")

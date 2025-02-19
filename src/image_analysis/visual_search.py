@@ -5,17 +5,16 @@ import io
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import cv2
-from googlesearch import search
-import overpy
+from overpy import Overpass
+from config import CONFIG
 
 
 class VisualSearchEngine:
-    def __init__(self, google_api_key: str = None, bing_api_key: str = None):
+    def __init__(self, google_api_key: Optional[str] = None, bing_api_key: Optional[str] = None):
         self.google_api_key = google_api_key
         self.bing_api_key = bing_api_key
-        self.osm_api = overpy.Overpass()
+        self.osm_api = Overpass()
         self.search_apis = {
             "google": self._search_google_images,
             "duckduckgo": self._search_duckduckgo,
@@ -23,41 +22,11 @@ class VisualSearchEngine:
             "business": self._search_business_locations,
         }
 
-    async def find_similar_locations(self, image_path: str, initial_location: Dict = None) -> List[Dict]:
+    async def find_similar_locations(self, image_data: Dict, search_area: Optional[Dict] = None) -> List[Dict]:
         """Find visually similar locations using multiple search engines"""
-        results = []
-        search_area = self._get_search_area(initial_location) if initial_location else None
-
-        # Convert image to format suitable for API requests
-        image_data = self._prepare_image(image_path)
-
-        # Perform parallel searches
         with ThreadPoolExecutor() as executor:
-            futures = []
-            for engine, search_func in self.search_apis.items():
-                future = executor.submit(search_func, image_data, search_area)
-                futures.append((engine, future))
-
-            # Collect results
-            for engine, future in futures:
-                try:
-                    engine_results = future.result()
-                    if engine_results:
-                        results.extend(engine_results)
-                except Exception as e:
-                    print(f"Error with {engine} search: {e}")
-
-        # Deduplicate and rank results
-        unique_results = self._deduplicate_results(results)
-        ranked_results = self._rank_results(unique_results, initial_location)
-
-        # Verify business locations if available
-        if initial_location:
-            verified_results = self._verify_business_locations(ranked_results, initial_location)
-            if verified_results:
-                ranked_results = verified_results
-
-        return ranked_results
+            futures = [executor.submit(search_func, image_data, search_area) for search_func in self.search_apis.values()]
+            return [future.result() for future in futures]
 
     def _prepare_image(self, image_path: str) -> Dict:
         """Prepare image data for API requests"""
@@ -104,7 +73,7 @@ class VisualSearchEngine:
             print(f"Error creating search area: {str(e)}")
             return None
 
-    def _search_google_images(self, image_data: Dict, search_area: Dict = None) -> List[Dict]:
+    def _search_google_images(self, image_data: Dict, search_area: Optional[Dict] = None) -> List[Dict]:
         """Search Google for similar images"""
         if not self.google_api_key:
             return []
@@ -254,7 +223,7 @@ class VisualSearchEngine:
             print(f"DuckDuckGo search error: {e}")
             return []
 
-    def _search_osm_images(self, image_data: Dict, search_area: Dict = None) -> List[Dict]:
+    def _search_osm_images(self, image_data: Dict, search_area: Optional[Dict] = None) -> List[Dict]:
         """Search OpenStreetMap for images and locations"""
         if not search_area or not isinstance(search_area, dict):
             print("Invalid or missing search area")

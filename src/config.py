@@ -3,13 +3,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-CONFIG = {
-    "openrouter_api_key": os.getenv("OPENROUTER_API_KEY"),
-    "geonames_username": os.getenv("GEONAMES_USERNAME"),
-    "app_name": "GeoLocator",
-    "app_url": "https://your-app-url.com",
-    "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
-    "BING_API_KEY": os.getenv("BING_API_KEY"),
-    "GOOGLE_SEARCH_CX": os.getenv("GOOGLE_SEARCH_CX"),  # Custom Search Engine ID
-    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
-}
+
+class Config:
+    """Centralized configuration class"""
+
+    def __init__(self):
+        self.OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+        self.GEONAMES_USERNAME = os.getenv("GEONAMES_USERNAME")
+        self.GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+        self.BING_API_KEY = os.getenv("BING_API_KEY")
+        self.GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
+        self.GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        self.APP_NAME = "GeoLocator"
+        self.APP_URL = os.getenv("APP_URL", "https://your-app-url.com")
+        self.IMAGE_DIR = os.getenv("IMAGES_DIR", "/app/images")
+
+
+CONFIG = Config()

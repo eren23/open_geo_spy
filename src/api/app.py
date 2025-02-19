@@ -28,19 +28,19 @@ app.add_middleware(
 )
 
 # Initialize the GeoLocator components
-image_analyzer = ImageAnalyzer(CONFIG["openrouter_api_key"], CONFIG["app_name"], CONFIG["app_url"])
-geo_interface = GeoDataInterface(geonames_username=CONFIG["geonames_username"])
-location_resolver = LocationResolver(CONFIG["openrouter_api_key"])
+image_analyzer = ImageAnalyzer(CONFIG.OPENROUTER_API_KEY, CONFIG.APP_NAME, CONFIG.APP_URL)
+geo_interface = GeoDataInterface(geonames_username=CONFIG.GEONAMES_USERNAME)
+location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
 
 # Configure Gemini
-if not CONFIG.get("GEMINI_API_KEY"):
+if not CONFIG.GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is required in environment variables")
 
-genai.configure(api_key=CONFIG["GEMINI_API_KEY"])
+genai.configure(api_key=CONFIG.GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 # Ensure upload directory exists
-UPLOAD_DIR = os.path.join(os.getenv("IMAGES_DIR", "/app/images"))
+UPLOAD_DIR = os.path.join(CONFIG.IMAGE_DIR)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
