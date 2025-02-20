@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from PIL import Image
 import numpy as np
 import cv2
@@ -41,9 +41,15 @@ class ImageAnalyzer:
         combined_text = self._combine_chunk_results(all_text)
         text_features = self._parse_text_analysis(combined_text)
 
+        # Analyze environmental features
+        env_features = self._analyze_environment(cv_image)
+
         # Second pass: Full image analysis with text context
         location_analysis = self._analyze_location_features(image, text_features)
         features = self._parse_analysis(location_analysis, text_features)
+
+        # Merge environmental features
+        features.update(env_features)
 
         # Add time analysis
         time_analysis = self._estimate_time_of_day(cv_image, {})
@@ -205,22 +211,34 @@ class ImageAnalyzer:
         image_base64 = base64.b64encode(buffered.getvalue()).decode()
         image_url = f"data:image/jpeg;base64,{image_base64}"
 
+        # Add license plate analysis to the prompt
         location_prompt = f"""
         Analyze this image and extract all relevant location information.
+        IMPORTANT: Focus on finding the MOST SPECIFIC location possible - prefer city/district level over country level.
         
         Previously extracted text:
         {text_features}
         
-        Please identify:
-        1. Landmarks and buildings (including any text/names found)
-        2. Exact street names and addresses from visible signs
-        3. Geographic features and surroundings
-        4. Architectural styles and time period indicators
-        5. Weather conditions and time of day
-        6. Vegetation types
-        7. Any additional location clues from the text
+        License Plates Found:
+        {', '.join(text_features.get('license_plates', []))}
         
-        For each identified feature, rate your confidence (0-1) and explain your reasoning.
+        Please identify with high precision:
+        1. Exact city/district name from license plates (e.g. if plate starts with 16, it's Bursa)
+        2. Specific neighborhood or area within the city
+        3. Landmarks and buildings (including any text/names found)
+        4. Exact street names and addresses from visible signs
+        5. Geographic features and surroundings
+        6. Architectural styles and time period indicators
+        7. Weather conditions and time of day
+        8. Vegetation types
+        9. Any additional location clues from the text
+        10. Traffic signs and road markings style
+        
+        For each identified feature:
+        - Rate your confidence (0-1)
+        - Explain your reasoning
+        - Start with the most specific location indicator (e.g. license plate city code)
+        - Only fall back to broader regions if specific location cannot be determined
         """
 
         completion = self.client.chat.completions.create(
@@ -233,7 +251,15 @@ class ImageAnalyzer:
 
     def _parse_text_analysis(self, text_analysis: str) -> Dict[str, List[str]]:
         """Parse the text extraction response into structured data"""
-        features = {"street_signs": [], "building_info": [], "business_names": [], "informational": [], "other_text": []}
+        features = {
+            "street_signs": [],
+            "building_info": [],
+            "business_names": [],
+            "informational": [],
+            "other_text": [],
+            "license_plates": [],  # List of raw plate numbers
+            "license_plate_info": [],  # List of dicts with detailed plate info
+        }
 
         current_category = None
         for line in text_analysis.split("\n"):
@@ -248,9 +274,161 @@ class ImageAnalyzer:
                 continue
 
             if current_category and line.startswith("-"):
-                features[current_category].append(line[1:].strip())
+                text = line[1:].strip()
+                # Check for license plate patterns
+                is_plate, plate_info = self._is_license_plate(text)
+                if is_plate:
+                    features["license_plates"].append(text)
+                    if plate_info:
+                        features["license_plate_info"].append({"plate_number": text, **plate_info})
+                else:
+                    features[current_category].append(text)
 
         return features
+
+    def _is_license_plate(self, text: str) -> Tuple[bool, Optional[Dict[str, str]]]:
+        """Detect if text matches common license plate patterns and extract region info"""
+        import re
+
+        # Common license plate patterns by region with city/area codes
+        patterns = {
+            "USA": {
+                "patterns": [
+                    (r"^([A-Z]{1,3})\s*\d{3,4}$", "state_prefix"),  # ABC 123 - State prefix
+                    (r"^\d{3}\s*([A-Z]{2,3})$", "state_suffix"),  # 123 ABC - State suffix
+                    (r"^([A-Z0-9]{1,3})[A-Z0-9]{2,5}$", "state_mixed"),  # Generic US plate
+                ],
+                "region_codes": {"NY": "New York", "CA": "California", "TX": "Texas", "FL": "Florida", "IL": "Illinois", "PA": "Pennsylvania"},
+            },
+            "Europe": {
+                "patterns": [
+                    # German format: City code + numbers + letters
+                    (r"^([A-Z]{1,3})-[A-Z]{1,2}\s*\d{1,4}$", "german"),
+                    # UK format: Area code + year + letters
+                    (r"^([A-Z]{2})\d{2}\s*[A-Z]{3}$", "uk"),
+                    # French format: Department number + letters + numbers
+                    (r"^(\d{2,3})-[A-Z]{3}-\d{2,3}$", "french"),
+                ],
+                "region_codes": {
+                    # German cities
+                    "B": "Berlin",
+                    "M": "Munich",
+                    "K": "Cologne",
+                    "F": "Frankfurt",
+                    "HH": "Hamburg",
+                    "S": "Stuttgart",
+                    # UK areas
+                    "LA": "London",
+                    "MA": "Manchester",
+                    "LV": "Liverpool",
+                    "BI": "Birmingham",
+                    "ED": "Edinburgh",
+                    # French departments
+                    "75": "Paris",
+                    "69": "Lyon",
+                    "13": "Marseille",
+                    "33": "Bordeaux",
+                    "31": "Toulouse",
+                },
+            },
+            "Turkey": {
+                "patterns": [
+                    # Turkish format: City code (1-81) + Letter(s) + Numbers
+                    (r"^(\d{2})\s*[A-Z]{1,3}\s*\d{2,4}$", "turkish"),  # 34 ABC 123
+                    (r"^(\d{2})\s*[A-Z]{1,3}\s*\d{2,4}$", "turkish_new"),  # Modern format
+                ],
+                "region_codes": {
+                    "01": "Adana",
+                    "06": "Ankara",
+                    "07": "Antalya",
+                    "16": "Bursa",
+                    "26": "Eskişehir",
+                    "27": "Gaziantep",
+                    "34": "Istanbul",
+                    "35": "Izmir",
+                    "38": "Kayseri",
+                    "41": "Kocaeli",
+                    "42": "Konya",
+                    "55": "Samsun",
+                    "61": "Trabzon",
+                    "65": "Van",
+                    "33": "Mersin",
+                    "20": "Denizli",
+                    "09": "Aydın",
+                    "48": "Muğla",
+                    "10": "Balıkesir",
+                    "45": "Manisa",
+                    "31": "Hatay",
+                    "44": "Malatya",
+                    "25": "Erzurum",
+                    "23": "Elazığ",
+                    "21": "Diyarbakır",
+                    "46": "Kahramanmaraş",
+                    "52": "Ordu",
+                    "53": "Rize",
+                    "54": "Sakarya",
+                    "63": "Şanlıurfa",
+                    # Add more Turkish cities as needed
+                },
+                "districts": {
+                    "16": {  # Bursa districts
+                        "central": ["Osmangazi", "Yıldırım", "Nilüfer", "Gürsu", "Kestel"],
+                        "outer": ["Mudanya", "Gemlik", "İnegöl", "Orhangazi", "İznik"],
+                    },
+                    # Add other cities' districts as needed
+                },
+            },
+            "Asia": {
+                "patterns": [
+                    # Indian format: State code + district code + number series
+                    (r"^([A-Z]{2})\s*\d{1,2}\s*[A-Z]{1,2}\s*\d{4}$", "indian"),
+                    # Korean format: Area code + vehicle type + numbers
+                    (r"^(\d{2,3})\s*[가-힣]\s*\d{4}$", "korean"),
+                    # Japanese format: Area name + classification + numbers
+                    (r"^((?:東京|名古屋|大阪|横浜))\s*\d{3,4}$", "japanese"),
+                ],
+                "region_codes": {
+                    # Indian states
+                    "MH": "Maharashtra",
+                    "DL": "Delhi",
+                    "KA": "Karnataka",
+                    "TN": "Tamil Nadu",
+                    "UP": "Uttar Pradesh",
+                    # Korean regions
+                    "11": "Seoul",
+                    "21": "Busan",
+                    "22": "Daegu",
+                    "23": "Incheon",
+                    "24": "Gwangju",
+                    # Japanese cities
+                    "東京": "Tokyo",
+                    "名古屋": "Nagoya",
+                    "大阪": "Osaka",
+                    "横浜": "Yokohama",
+                },
+            },
+        }
+
+        # Clean the text
+        text = text.upper().replace("-", "").strip()
+
+        # Check against all patterns
+        for region, region_data in patterns.items():
+            for pattern, pattern_type in region_data["patterns"]:
+                match = re.match(pattern, text)
+                if match:
+                    # Extract the region code from the match
+                    region_code = match.group(1)
+                    # Look up the city/region name
+                    location = region_data["region_codes"].get(region_code)
+                    return True, {
+                        "country": region,
+                        "region_code": region_code,
+                        "region_name": location if location else "Unknown",
+                        "pattern_type": pattern_type,
+                    }
+
+        return False, None
 
     def _parse_analysis(self, analysis: str, text_features: Dict[str, List[str]]) -> Dict:
         """Parse the location analysis into structured features"""
@@ -409,3 +587,172 @@ class ImageAnalyzer:
                 result["period"] = "night"
 
         return result
+
+    def _analyze_environment(self, cv_image: np.ndarray) -> Dict:
+        """Analyze environmental features in the image"""
+        features = {
+            "terrain_type": [],
+            "water_bodies": [],
+            "sky_features": [],
+            "building_density": "unknown",
+            "road_types": [],
+            "vegetation_density": "unknown",
+        }
+
+        try:
+            # Analyze terrain using color segmentation
+            terrain_features = self._analyze_terrain(cv_image)
+            features["terrain_type"] = terrain_features
+
+            # Detect water bodies
+            water_features = self._detect_water_bodies(cv_image)
+            features["water_bodies"] = water_features
+
+            # Analyze sky features
+            sky_features = self._analyze_sky(cv_image)
+            features["sky_features"] = sky_features
+
+            # Estimate building density
+            features["building_density"] = self._estimate_building_density(cv_image)
+
+            # Detect road types
+            features["road_types"] = self._detect_road_types(cv_image)
+
+            # Analyze vegetation density
+            features["vegetation_density"] = self._analyze_vegetation_density(cv_image)
+
+        except Exception as e:
+            print(f"Error in environment analysis: {e}")
+
+        return features
+
+    def _analyze_terrain(self, image: np.ndarray) -> List[str]:
+        """Analyze terrain types using color and texture analysis"""
+        # Convert to HSV for better color segmentation
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Define color ranges for different terrain types
+        terrain_colors = {
+            "sand": ([20, 50, 50], [40, 255, 255]),
+            "grass": ([35, 50, 50], [85, 255, 255]),
+            "snow": ([0, 0, 200], [180, 30, 255]),
+            "rock": ([0, 0, 50], [180, 50, 200]),
+        }
+
+        terrain_types = []
+        for terrain, (lower, upper) in terrain_colors.items():
+            mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+            if np.sum(mask) > 0.1 * mask.size:  # If more than 10% of image matches
+                terrain_types.append(terrain)
+
+        return terrain_types
+
+    def _detect_water_bodies(self, image: np.ndarray) -> List[str]:
+        """Detect presence of water bodies"""
+        # Convert to HSV for water detection
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Water color ranges (blue/green hues)
+        water_lower = np.array([90, 50, 50])
+        water_upper = np.array([130, 255, 255])
+
+        # Create mask for water colors
+        mask = cv2.inRange(hsv, water_lower, water_upper)
+
+        water_types = []
+        water_area = np.sum(mask) / mask.size
+
+        if water_area > 0.3:  # Large water body
+            water_types.append("large_water_body")
+        elif water_area > 0.1:  # Small water body
+            water_types.append("small_water_body")
+
+        return water_types
+
+    def _analyze_sky(self, image: np.ndarray) -> List[str]:
+        """Analyze sky features"""
+        # Convert to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Sky detection (upper third of image)
+        height = image.shape[0]
+        sky_region = hsv[: height // 3, :, :]
+
+        features = []
+
+        # Check for clear sky
+        blue_lower = np.array([100, 50, 50])
+        blue_upper = np.array([140, 255, 255])
+        blue_mask = cv2.inRange(sky_region, blue_lower, blue_upper)
+
+        # Check for clouds
+        white_lower = np.array([0, 0, 200])
+        white_upper = np.array([180, 30, 255])
+        white_mask = cv2.inRange(sky_region, white_lower, white_upper)
+
+        if np.sum(blue_mask) > 0.6 * blue_mask.size:
+            features.append("clear_sky")
+        if np.sum(white_mask) > 0.3 * white_mask.size:
+            features.append("cloudy")
+
+        return features
+
+    def _estimate_building_density(self, image: np.ndarray) -> str:
+        """Estimate building density in the image"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Edge detection
+        edges = cv2.Canny(gray, 50, 150)
+
+        # Calculate edge density
+        edge_density = np.sum(edges) / edges.size
+
+        if edge_density > 0.1:
+            return "high_density"
+        elif edge_density > 0.05:
+            return "medium_density"
+        else:
+            return "low_density"
+
+    def _detect_road_types(self, image: np.ndarray) -> List[str]:
+        """Detect types of roads present"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Line detection using HoughLinesP
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=100, maxLineGap=10)
+
+        road_types = []
+        if lines is not None:
+            if len(lines) > 20:
+                road_types.append("major_road")
+            elif len(lines) > 10:
+                road_types.append("street")
+            else:
+                road_types.append("path")
+
+        return road_types
+
+    def _analyze_vegetation_density(self, image: np.ndarray) -> str:
+        """Analyze vegetation density using green color detection"""
+        # Convert to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Green color range for vegetation
+        lower_green = np.array([35, 50, 50])
+        upper_green = np.array([85, 255, 255])
+
+        # Create mask for vegetation
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Calculate vegetation density
+        density = np.sum(mask) / mask.size
+
+        if density > 0.3:
+            return "high"
+        elif density > 0.1:
+            return "medium"
+        else:
+            return "low"

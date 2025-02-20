@@ -36,28 +36,39 @@ class LocationResolver:
         """Refine location using business and landmark verification"""
         businesses = features.get("extracted_text", {}).get("business_names", [])
         landmarks = features.get("landmarks", [])
+        license_plates = features.get("extracted_text", {}).get("license_plates", [])
 
-        if not businesses and not landmarks:
+        if not (businesses or landmarks or license_plates):
             return None
 
         verification_prompt = f"""
         Given a potential location at {location['name']} ({location['lat']}, {location['lon']}),
-        verify and refine this location using the following businesses/landmarks:
+        verify and refine this location using the following information:
         
         Businesses: {', '.join(businesses)}
         Landmarks: {', '.join(landmarks)}
+        License Plates: {', '.join(license_plates)}
+        
+        Environmental Context:
+        - Terrain: {', '.join(features.get('terrain_type', []))}
+        - Water Bodies: {', '.join(features.get('water_bodies', []))}
+        - Building Density: {features.get('building_density', 'unknown')}
+        - Road Types: {', '.join(features.get('road_types', []))}
+        - Vegetation: {features.get('vegetation_density', 'unknown')}
         
         Tasks:
-        1. Search for these businesses/landmarks near the given coordinates
-        2. Verify if they exist in the expected location
-        3. If found, provide their exact coordinates
-        4. Calculate confidence based on matches
+        1. Verify if the environmental features match the proposed location
+        2. Check if license plates match the region's format
+        3. Search for the businesses/landmarks near the coordinates
+        4. Verify if they exist in the expected location
+        5. If found, provide their exact coordinates
+        6. Calculate confidence based on all matches
         
         Return your response in this format:
         Location: [refined name with street/area]
         Coordinates: [lat], [lon]
         Confidence: [0-1]
-        Reasoning: [explanation including found/not found businesses]
+        Reasoning: [explanation including all verification steps]
         """
 
         completion = self.client.chat.completions.create(model="google/gemini-2.0-flash-001", messages=[{"role": "user", "content": verification_prompt}])
@@ -103,18 +114,51 @@ class LocationResolver:
         candidates_text = self._format_candidates(candidates)
         location_context = f"\nProvided Location Context: {location_hint}" if location_hint else ""
 
+        # Extract environmental features
+        env_features = {
+            "terrain": features.get("terrain_type", []),
+            "water": features.get("water_bodies", []),
+            "sky": features.get("sky_features", []),
+            "buildings": features.get("building_density", "unknown"),
+            "roads": features.get("road_types", []),
+            "vegetation": features.get("vegetation_density", "unknown"),
+        }
+
+        # Extract license plate information with region details
+        license_plates = features.get("extracted_text", {}).get("license_plates", [])
+        license_plate_info = features.get("extracted_text", {}).get("license_plate_info", [])
+
+        # Format license plate information
+        plate_details = []
+        for plate_info in license_plate_info:
+            plate_details.append(
+                f"Plate: {plate_info['plate_number']} "
+                f"(Country: {plate_info['country']}, "
+                f"Region: {plate_info['region_name']} [{plate_info['region_code']}])"
+            )
+
         return f"""
-        Given an image with the following description and features, determine the most likely location.{location_context}
+        Given an image with the following description and features, determine the MOST SPECIFIC location possible.
+        IMPORTANT: Prefer city/district level locations over country-level. If a license plate indicates a specific city (e.g. 16 for Bursa), that should be your primary location indicator.{location_context}
 
         Image Description: {description}
         
-        Extracted Features:
+        Environmental Features:
+        - Terrain Type: {', '.join(env_features['terrain']) if env_features['terrain'] else 'Unknown'}
+        - Water Bodies: {', '.join(env_features['water']) if env_features['water'] else 'None detected'}
+        - Sky Conditions: {', '.join(env_features['sky']) if env_features['sky'] else 'Unknown'}
+        - Building Density: {env_features['buildings']}
+        - Road Types: {', '.join(env_features['roads']) if env_features['roads'] else 'Unknown'}
+        - Vegetation Density: {env_features['vegetation']}
+        
+        License Plate Analysis:
+        {chr(10).join(plate_details) if plate_details else 'No license plates detected'}
+        
+        Other Features:
         - Landmarks: {', '.join(features['landmarks']) if features['landmarks'] else 'None detected'}
         - Architecture: {features['architecture_style'] or 'Unknown'}
         - Time of Day: {features['time_of_day'] or 'Unknown'}
-        - Vegetation: {', '.join(features['vegetation']) if features['vegetation'] else 'None detected'}
         - Weather: {features['weather'] or 'Unknown'}
-        - Geographic Features: {', '.join(features['geographic_features']) if features['geographic_features'] else 'None detected'}
         - Business Names: {', '.join(features.get('extracted_text', {}).get('business_names', []))}
         - Street Signs: {', '.join(features.get('extracted_text', {}).get('street_signs', []))}
         - Building Info: {', '.join(features.get('extracted_text', {}).get('building_info', []))}
@@ -122,14 +166,26 @@ class LocationResolver:
         Potential Locations:
         {candidates_text}
         
-        Analyze the evidence and determine the most likely location.
-        If a location context was provided, give higher confidence to matches within or near that area.
+        Please analyze all evidence to determine the most specific location possible, considering:
+        1. License plate region codes - these provide exact city information (e.g. 16 = Bursa)
+        2. Specific districts or neighborhoods within the identified city
+        3. Street names and building numbers
+        4. Business locations and landmarks
+        5. Match between environmental features and local geography
+        6. Architectural styles and building patterns
+        7. Language and script used in signs
+        8. Road types and infrastructure style
+        9. Vegetation patterns and climate indicators
+        
+        If a location context was provided, prioritize matches within that area.
+        License plate region codes should be your primary indicator for city-level location.
+        Only fall back to broader regions if no specific location can be determined.
         
         Return your response in this format:
-        Location: [name]
+        Location: [most specific name - include city AND district/neighborhood if possible]
         Coordinates: [lat], [lon]
         Confidence: [0-1]
-        Reasoning: [explanation]
+        Reasoning: [detailed explanation prioritizing specific location indicators]
         """
 
     def _format_candidates(self, candidates: List[Dict]) -> str:
