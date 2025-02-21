@@ -1,0 +1,12 @@
+{
+    "mexico": {
+        "types": ["white_rectangular_reflective"],
+        "confidence": 0.9,
+        "description": "Unique white rectangular bollards with reflective elements"
+    },
+    "iceland": {
+        "types": ["yellow_numbered"],
+        "confidence": 0.9,
+        "description": "Yellow bollards with black numbers"
+    }
+} 

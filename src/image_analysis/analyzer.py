@@ -16,8 +16,41 @@ class ImageAnalyzer:
         self.chunk_size = (800, 800)  # Size of each chunk
         self.overlap = 100  # Overlap between chunks in pixels
 
+        # Add new analysis categories
+        self.analysis_categories = {
+            "driving_side": None,  # Left/Right
+            "camera_generation": None,  # Gen 1-4 or "shitcam"
+            "camera_height": None,  # Normal/Low
+            "season": None,
+            "time_of_day": None,
+            "weather": None,
+            "infrastructure": {
+                "road_type": None,  # Concrete/Asphalt/Dirt etc
+                "road_lines": None,  # Color and pattern
+                "bollards": [],  # List of detected bollard types
+                "utility_poles": [],  # List of detected pole types
+                "signs": [],  # Traffic/Street signs detected
+            },
+            "environment": {
+                "terrain_type": [],
+                "vegetation_type": [],
+                "soil_color": None,
+                "building_density": None,
+                "architecture_style": None,
+            },
+        }
+
+        # Add infrastructure detection parameters
+        self.road_hsv_ranges = {
+            "asphalt": [(0, 0, 0), (180, 30, 80)],  # Dark gray
+            "concrete": [(0, 0, 150), (180, 30, 255)],  # Light gray
+            "dirt": [(20, 20, 20), (30, 255, 200)],  # Brown
+        }
+
+        self.line_colors = {"white": [(0, 0, 200), (180, 30, 255)], "yellow": [(20, 100, 100), (30, 255, 255)]}
+
     def analyze_image(self, image_path: str) -> Tuple[Dict, str]:
-        """Analyze image with enhanced text and visual understanding"""
+        """Enhanced image analysis incorporating GeoGuessr techniques"""
         # Load and prepare image
         if image_path.startswith(("http://", "https://")):
             response = requests.get(image_path)
@@ -27,63 +60,25 @@ class ImageAnalyzer:
             image = Image.open(image_path)
             cv_image = cv2.imread(image_path)
 
-        # Get image chunks
-        chunks = self._create_image_chunks(cv_image)
+        # Analyze camera characteristics
+        self._analyze_camera_meta(cv_image)
 
-        # Extract text from each chunk
-        all_text = []
-        for i, (chunk, coords) in enumerate(chunks):
-            chunk_text = self._extract_text_from_chunk(chunk, image, coords)
-            if chunk_text:
-                all_text.append(chunk_text)
+        # Analyze driving side
+        self._analyze_driving_side(cv_image)
 
-        # Combine and deduplicate text findings
-        combined_text = self._combine_chunk_results(all_text)
-        text_features = self._parse_text_analysis(combined_text)
+        # Analyze environment
+        self._analyze_environment(cv_image)
 
-        # Analyze environmental features
-        env_features = self._analyze_environment(cv_image)
+        # Analyze infrastructure
+        self._analyze_infrastructure(cv_image)
 
-        # Second pass: Full image analysis with text context
-        location_analysis = self._analyze_location_features(image, text_features)
-        features = self._parse_analysis(location_analysis, text_features)
+        # Use VLM for high-level analysis
+        vlm_features = self._analyze_with_vlm(image)
 
-        # Merge environmental features
-        features.update(env_features)
+        # Combine all analyses
+        features = {**self.analysis_categories, **vlm_features}
 
-        # Add time analysis
-        time_analysis = self._estimate_time_of_day(cv_image, {})
-        features["time_analysis"] = time_analysis
-
-        if time_analysis.get("estimated_hour"):
-            # Format time as HH:MM, ensuring consistent decimal places
-            hour = int(time_analysis["estimated_hour"])
-            minute = int((time_analysis["estimated_hour"] % 1) * 60)
-            features["time_of_day"] = f"{hour:02d}:{minute:02d}"
-        else:
-            features["time_of_day"] = time_analysis["time_of_day"]
-
-        # Update prompt with time information
-        prompt = f"""
-        I'm showing you a section of a larger image (coordinates: {coords}).
-        Focus on finding and reading any text in this section.
-        Look for:
-        1. Signs and labels
-        2. Street names
-        3. Building numbers
-        4. Business names
-        5. Any other text
-
-        List all text you can read, with confidence levels (0-1).
-        Format: "Text: [text] (confidence: [0-1])"
-
-        Time Analysis:
-        - Time of Day: {features['time_of_day']}
-        - Period: {time_analysis.get('period', 'unknown')}
-        - Confidence: {time_analysis['confidence']:.2f}
-        """
-
-        return features, f"{combined_text}\n\n{location_analysis}"
+        return features, self._generate_analysis_description(features)
 
     def _create_image_chunks(self, image: np.ndarray) -> List[Tuple[np.ndarray, Tuple[int, int, int, int]]]:
         """Create overlapping chunks of the image"""
@@ -756,3 +751,404 @@ class ImageAnalyzer:
             return "medium"
         else:
             return "low"
+
+    def _analyze_camera_meta(self, image: np.ndarray):
+        """Analyze camera generation and height"""
+        # Check for circular blur patterns characteristic of Gen 2
+        # Check for color saturation levels for Gen 3 vs 4
+        # Check for low camera height indicators
+        # Implementation details...
+
+    def _analyze_driving_side(self, image: np.ndarray):
+        """Determine which side of the road vehicles drive on"""
+        # Look for:
+        # - Visible vehicles and their direction
+        # - Road signs placement
+        # - Road markings direction
+        # Implementation details...
+
+    def _analyze_with_vlm(self, image: Image) -> Dict:
+        """Use VLM to analyze high-level features"""
+        # Convert image for API
+        buffered = io.BytesIO()
+        image.save(buffered, format="JPEG")
+        image_base64 = base64.b64encode(buffered.getvalue()).decode()
+        image_url = f"data:image/jpeg;base64,{image_base64}"
+
+        prompt = """Analyze this image for location-identifying features. Focus on:
+        1. Architecture style and building materials
+        2. Vegetation types and patterns
+        3. Road infrastructure (signs, poles, bollards)
+        4. Terrain and landscape features
+        5. Any visible text or signage
+        6. Weather conditions and time of day
+        7. Cultural indicators (clothing, vehicles, etc)
+        
+        Format your response in this structure:
+        ARCHITECTURE:
+        - Style: [style name]
+        - Materials: [list materials]
+        - Notable features: [list features]
+        
+        VEGETATION:
+        - Types: [list vegetation types]
+        - Density: [low/medium/high]
+        
+        INFRASTRUCTURE:
+        - Road type: [type]
+        - Signs: [list signs]
+        - Street furniture: [list items]
+        
+        TERRAIN:
+        - Type: [describe terrain]
+        - Features: [list notable features]
+        
+        TEXT:
+        - Signs: [list text from signs]
+        - Business names: [list business names]
+        - Other text: [list other visible text]
+        
+        CULTURAL:
+        - Vehicles: [describe vehicles]
+        - People: [describe clothing/activities]
+        - Other indicators: [list other cultural elements]
+        
+        WEATHER/TIME:
+        - Weather: [describe conditions]
+        - Time of day: [estimate]
+        - Season: [if apparent]
+        
+        For each item, include a confidence score (0-1)."""
+
+        try:
+            completion = self.client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]}],
+                extra_headers=self.headers,
+            )
+
+            # Parse the response into structured data
+            response_text = completion.choices[0].message.content
+            features = self._parse_vlm_response(response_text)
+
+            return features
+
+        except Exception as e:
+            print(f"Error in VLM analysis: {e}")
+            # Return empty features rather than None
+            return {
+                "architecture_style": None,
+                "vegetation": [],
+                "infrastructure_features": [],
+                "terrain_features": [],
+                "extracted_text": {"signs": [], "business_names": [], "other": []},
+                "cultural_indicators": [],
+                "weather": None,
+                "time_of_day": None,
+                "season": None,
+                "confidence_scores": {},
+            }
+
+    def _parse_vlm_response(self, response: str) -> Dict:
+        """Parse the VLM response into structured features"""
+        features = {
+            "architecture_style": None,
+            "vegetation": [],
+            "infrastructure_features": [],
+            "terrain_features": [],
+            "extracted_text": {"signs": [], "business_names": [], "other": []},
+            "cultural_indicators": [],
+            "landmarks": [],  # Add landmarks list
+            "addresses": [],  # Add addresses list
+            "geographic_features": [],  # Add geographic features
+            "weather": None,
+            "time_of_day": None,
+            "season": None,
+            "confidence_scores": {},
+        }
+
+        try:
+            current_section = None
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Check for section headers
+                if line.endswith(":"):
+                    current_section = line[:-1].lower()
+                    continue
+
+                # Parse content based on section
+                if line.startswith("-"):
+                    content = line[1:].strip()
+                    confidence = 1.0  # Default confidence
+
+                    # Extract confidence if present
+                    if "(confidence:" in content.lower():
+                        parts = content.lower().split("(confidence:")
+                        content = parts[0].strip()
+                        try:
+                            confidence = float(parts[1].strip(")"))
+                        except ValueError:
+                            pass
+
+                    # Add content to appropriate section
+                    if current_section == "architecture":
+                        if "style:" in content.lower():
+                            features["architecture_style"] = content.split(":", 1)[1].strip()
+                            features["confidence_scores"]["architecture"] = confidence
+                        elif "notable features:" in content.lower():
+                            features["landmarks"].extend([f.strip() for f in content.split(":", 1)[1].split(",")])
+                    elif current_section == "vegetation":
+                        if "types:" in content.lower():
+                            features["vegetation"].extend([v.strip() for v in content.split(":", 1)[1].split(",")])
+                            features["confidence_scores"]["vegetation"] = confidence
+                    elif current_section == "infrastructure":
+                        if any(k in content.lower() for k in ["road type:", "signs:", "street furniture:"]):
+                            features["infrastructure_features"].append(content)
+                    elif current_section == "terrain":
+                        features["terrain_features"].append(content)
+                        if "type:" in content.lower():
+                            features["confidence_scores"]["terrain"] = confidence
+                    elif current_section == "text":
+                        if "business names:" in content.lower():
+                            features["extracted_text"]["business_names"].extend([b.strip() for b in content.split(":", 1)[1].split(",")])
+                        elif "signs:" in content.lower():
+                            features["extracted_text"]["signs"].extend([s.strip() for s in content.split(":", 1)[1].split(",")])
+                        else:
+                            features["extracted_text"]["other"].append(content)
+                        features["confidence_scores"]["text"] = confidence
+                    elif current_section == "cultural":
+                        features["cultural_indicators"].append(content)
+                    elif current_section == "weather/time":
+                        if "weather:" in content.lower():
+                            features["weather"] = content.split(":", 1)[1].strip()
+                        elif "time of day:" in content.lower():
+                            features["time_of_day"] = content.split(":", 1)[1].strip()
+                        elif "season:" in content.lower():
+                            features["season"] = content.split(":", 1)[1].strip()
+
+        except Exception as e:
+            print(f"Error parsing VLM response: {e}")
+            # Don't override the default empty features on error
+
+        return features
+
+    def _generate_analysis_description(self, features: Dict) -> str:
+        """Generate human-readable description of analysis results"""
+        description_parts = []
+
+        # Add architecture information
+        if features.get("architecture_style"):
+            description_parts.append(f"Architecture Style: {features['architecture_style']}")
+
+        # Add landmarks
+        if features.get("landmarks"):
+            description_parts.append(f"Landmarks: {', '.join(features['landmarks'])}")
+
+        # Add business names
+        if features.get("extracted_text", {}).get("business_names"):
+            description_parts.append(f"Businesses: {', '.join(features['extracted_text']['business_names'])}")
+
+        # Add signs
+        if features.get("extracted_text", {}).get("signs"):
+            description_parts.append(f"Signs: {', '.join(features['extracted_text']['signs'])}")
+
+        # Add infrastructure features
+        if features.get("infrastructure_features"):
+            description_parts.append(f"Infrastructure: {', '.join(features['infrastructure_features'])}")
+
+        # Add terrain features
+        if features.get("terrain_features"):
+            description_parts.append(f"Terrain: {', '.join(features['terrain_features'])}")
+
+        # Add weather and time
+        if features.get("weather"):
+            description_parts.append(f"Weather: {features['weather']}")
+        if features.get("time_of_day"):
+            description_parts.append(f"Time: {features['time_of_day']}")
+
+        # Add confidence scores
+        if features.get("confidence_scores"):
+            scores = [f"{k.title()}: {v:.2f}" for k, v in features["confidence_scores"].items()]
+            description_parts.append(f"Confidence Scores: {', '.join(scores)}")
+
+        return "\n".join(description_parts)
+
+    def _analyze_infrastructure(self, image: np.ndarray) -> None:
+        """Analyze infrastructure elements in the image"""
+        # Analyze road type
+        self.analysis_categories["infrastructure"]["road_type"] = self._detect_road_type(image)
+
+        # Analyze road lines
+        self.analysis_categories["infrastructure"]["road_lines"] = self._detect_road_lines(image)
+
+        # Detect bollards
+        self.analysis_categories["infrastructure"]["bollards"] = self._detect_bollards(image)
+
+        # Detect utility poles
+        self.analysis_categories["infrastructure"]["utility_poles"] = self._detect_utility_poles(image)
+
+        # Detect traffic signs
+        self.analysis_categories["infrastructure"]["signs"] = self._detect_traffic_signs(image)
+
+    def _detect_road_type(self, image: np.ndarray) -> str:
+        """Detect the type of road surface"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Get lower third of image where road is likely to be
+        height = image.shape[0]
+        road_region = hsv[int(height * 2 / 3) : height, :]
+
+        max_pixels = 0
+        road_type = "unknown"
+
+        for rtype, (lower, upper) in self.road_hsv_ranges.items():
+            mask = cv2.inRange(road_region, np.array(lower), np.array(upper))
+            pixel_count = np.sum(mask > 0)
+            if pixel_count > max_pixels:
+                max_pixels = pixel_count
+                road_type = rtype
+
+        return road_type
+
+    def _detect_road_lines(self, image: np.ndarray) -> List[str]:
+        """Detect road line markings"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        detected_lines = []
+
+        for color, (lower, upper) in self.line_colors.items():
+            mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+
+            # Apply edge detection
+            edges = cv2.Canny(mask, 50, 150)
+
+            # Detect lines using HoughLinesP
+            lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 50, minLineLength=100, maxLineGap=50)
+
+            if lines is not None and len(lines) > 0:
+                detected_lines.append(f"{color}_lines")
+
+        return detected_lines
+
+    def _detect_bollards(self, image: np.ndarray) -> List[str]:
+        """Detect bollards in the image"""
+        # Convert to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Apply adaptive thresholding
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        bollards = []
+        for contour in contours:
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+
+            # Filter based on aspect ratio and size
+            aspect_ratio = h / w if w > 0 else 0
+            if 2 < aspect_ratio < 8 and 20 < h < 200:
+                # Get color of potential bollard
+                roi = image[y : y + h, x : x + w]
+                avg_color = np.mean(roi, axis=(0, 1))
+
+                # Classify bollard type based on color and shape
+                bollard_type = self._classify_bollard(avg_color, aspect_ratio)
+                if bollard_type:
+                    bollards.append(bollard_type)
+
+        return list(set(bollards))  # Remove duplicates
+
+    def _detect_utility_poles(self, image: np.ndarray) -> List[str]:
+        """Detect utility poles in the image"""
+        # Similar approach to bollard detection but with different parameters
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+
+        # Detect vertical lines
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, minLineLength=200, maxLineGap=20)
+
+        poles = []
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi)
+
+                # If nearly vertical
+                if angle > 80:
+                    # Get region around line
+                    min_x = max(0, min(x1, x2) - 10)
+                    max_x = min(image.shape[1], max(x1, x2) + 10)
+                    roi = image[min(y1, y2) : max(y1, y2), min_x:max_x]
+
+                    if roi.size > 0:
+                        pole_type = self._classify_pole(roi)
+                        if pole_type:
+                            poles.append(pole_type)
+
+        return list(set(poles))
+
+    def _detect_traffic_signs(self, image: np.ndarray) -> List[str]:
+        """Detect traffic signs in the image"""
+        # Convert to HSV for better color detection
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # Define color ranges for common sign colors
+        color_ranges = {"red": [(0, 100, 100), (10, 255, 255)], "blue": [(100, 100, 100), (130, 255, 255)], "yellow": [(20, 100, 100), (30, 255, 255)]}
+
+        signs = []
+        for color, (lower, upper) in color_ranges.items():
+            mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for contour in contours:
+                # Get shape properties
+                area = cv2.contourArea(contour)
+                if area > 100:  # Filter small detections
+                    perimeter = cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
+
+                    # Classify sign based on shape
+                    sign_type = self._classify_sign(len(approx), color)
+                    if sign_type:
+                        signs.append(sign_type)
+
+        return list(set(signs))
+
+    def _classify_bollard(self, color: np.ndarray, aspect_ratio: float) -> Optional[str]:
+        """Classify bollard type based on color and shape"""
+        # Simple classification based on color
+        r, g, b = color
+
+        if r > 200 and g > 200 and b > 200:
+            return "white_bollard"
+        elif r > 200 and g < 100 and b < 100:
+            return "red_bollard"
+        elif r > 200 and g > 150 and b < 100:
+            return "yellow_bollard"
+
+        return None
+
+    def _classify_pole(self, roi: np.ndarray) -> Optional[str]:
+        """Classify utility pole type based on appearance"""
+        # Simple classification based on average color and texture
+        avg_color = np.mean(roi, axis=(0, 1))
+
+        if avg_color[0] > 100:  # Concrete/metal pole
+            return "concrete_pole"
+        else:  # Wooden pole
+            return "wooden_pole"
+
+    def _classify_sign(self, vertices: int, color: str) -> Optional[str]:
+        """Classify traffic sign based on shape and color"""
+        if vertices == 3:
+            return f"{color}_triangle_sign"
+        elif vertices == 4:
+            return f"{color}_rectangle_sign"
+        elif vertices > 7:  # Approximately circular
+            return f"{color}_circle_sign"
+
+        return None

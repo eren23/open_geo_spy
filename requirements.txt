@@ -13,3 +13,5 @@ scikit-learn
 opencv-python
 googlesearch-python
 google-generativeai>=0.3.0
+geopy>=2.4.0
+beautifulsoup4>=4.12.0

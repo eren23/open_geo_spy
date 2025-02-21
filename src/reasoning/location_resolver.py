@@ -1,28 +1,37 @@
 from typing import Dict, List, Optional
 import requests
 from openai import OpenAI
+from geo_data.location_refiner import LocationRefiner
 
 
 class LocationResolver:
     def __init__(self, llm_api_key: str):
         self.client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=llm_api_key)
+        self.location_refiner = LocationRefiner()
 
-    def resolve_location(self, image_features: Dict, location_candidates: List[Dict], image_description: str, location_hint: str = None) -> Dict:
+    def resolve_location(self, features: Dict, candidates: List[Dict], image_description: str, location_hint: str = None) -> Dict:
         """Use LLM to reason about the most likely location through multiple refinement steps"""
-        # Step 1: Initial location resolution
-        initial_location = self._initial_resolution(image_features, location_candidates, image_description, location_hint)
+        # Get initial location
+        initial_location = self._initial_resolution(features, candidates, image_description, location_hint)
 
-        # Step 2: Refine with business/landmark verification
-        if initial_location and initial_location["confidence"] > 0.7:
-            refined_location = self._refine_with_business_verification(initial_location, image_features)
-            if refined_location:
-                initial_location = refined_location
+        if not initial_location:
+            return {"success": False, "error": "Could not determine initial location"}
 
-        # Step 3: Refine with street-level details
-        if initial_location and initial_location["confidence"] > 0.8:
-            street_level_location = self._refine_with_street_details(initial_location, image_features)
-            if street_level_location:
-                initial_location = street_level_location
+        # If we have a city-level match with high confidence, try to refine it
+        if initial_location["confidence"] > 0.7 and "," in initial_location["name"]:
+            refined_locations = self.location_refiner.refine_location(initial_location, {"features": features})
+
+            if refined_locations:
+                best_match = refined_locations[0]
+                return {
+                    "name": best_match.name,
+                    "address": best_match.address,
+                    "lat": best_match.lat,
+                    "lon": best_match.lon,
+                    "confidence": best_match.confidence,
+                    "alternative_locations": refined_locations[1:],
+                    "reasoning": f"Refined from {initial_location['name']} based on visible landmarks and features",
+                }
 
         return initial_location
 
