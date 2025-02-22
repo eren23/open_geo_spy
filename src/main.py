@@ -15,14 +15,45 @@ class GeoLocator:
         self.location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
 
     async def process_image(self, image_path: str):
-        """Full processing pipeline for an image"""
+        """Full processing pipeline with detailed logging"""
+        print("\n=== Starting Image Processing ===")
+        print(f"Image: {image_path}")
+
+        # Extract metadata
         metadata = self.metadata_extractor.extract_metadata(image_path)
         initial_location = self._get_initial_location(metadata)
 
+        if initial_location:
+            print("\nInitial Location from Metadata:")
+            print(f"Coordinates: {initial_location['lat']}, {initial_location['lon']}")
+
+        # Analyze image
         features, description = self.image_analyzer.analyze_image(image_path)
+
+        print("\n=== Image Analysis Results ===")
+        print("Description:", description)
+        print("\nExtracted Features:")
+        for key, value in features.items():
+            print(f"{key}: {value}")
+
+        # Get location candidates
         candidates = await self._get_location_candidates(features, initial_location)
 
-        return self.location_resolver.resolve_location(features=features, candidates=candidates, description=description, metadata=metadata)
+        print("\n=== Location Candidates ===")
+        for candidate in candidates:
+            print(f"- {candidate['name']} ({candidate['lat']}, {candidate['lon']}) " f"[{candidate['confidence']}] from {candidate['source']}")
+
+        # Resolve final location
+        result = self.location_resolver.resolve_location(features=features, candidates=candidates, description=description, metadata=metadata)
+
+        print("\n=== Final Location ===")
+        print(f"Name: {result['name']}")
+        print(f"Coordinates: {result['lat']}, {result['lon']}")
+        print(f"Confidence: {result['confidence']}")
+        print(f"Reasoning: {result.get('reasoning', 'Not provided')}")
+        print("===========================\n")
+
+        return result
 
     def _get_initial_location(self, metadata: dict) -> dict:
         """Extract initial location from metadata"""

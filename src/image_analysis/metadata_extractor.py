@@ -5,6 +5,7 @@ import datetime
 import piexif
 import requests
 from io import BytesIO
+import os
 
 
 class MetadataExtractor:
@@ -13,26 +14,49 @@ class MetadataExtractor:
 
     def extract_metadata(self, image_path: str) -> Dict:
         """Extract all available metadata from image"""
-        if image_path.startswith(("http://", "https://")):
-            response = requests.get(image_path)
-            image = Image.open(BytesIO(response.content))
-        else:
-            image = Image.open(image_path)
+        try:
+            if image_path.startswith(("http://", "https://")):
+                response = requests.get(image_path)
+                image = Image.open(BytesIO(response.content))
+            else:
+                image = Image.open(image_path)
 
-        metadata = {
-            "dimensions": image.size,
-            "format": image.format,
-            "color_mode": image.mode,
-            "exif": self._extract_exif(image),
-            "creation_time": None,
-            "device_info": None,
-            "estimated_location": None,
-        }
+            metadata = {
+                "dimensions": image.size,
+                "format": image.format,
+                "color_mode": image.mode,
+                "exif": self._extract_exif(image),
+                "creation_time": None,
+                "device_info": None,
+                "estimated_location": None,
+                "filename": os.path.basename(image_path),
+            }
 
-        if "exif" in metadata and metadata["exif"]:
-            metadata.update(self._analyze_exif_data(metadata["exif"]))
+            if "exif" in metadata and metadata["exif"]:
+                metadata.update(self._analyze_exif_data(metadata["exif"]))
 
-        return metadata
+            # Debug logging
+            print("\n=== Image Metadata ===")
+            print(f"File: {metadata['filename']}")
+            print(f"Dimensions: {metadata['dimensions']}")
+            print(f"Format: {metadata['format']}")
+            print(f"Color Mode: {metadata['color_mode']}")
+            if metadata.get("exif"):
+                print("\nEXIF Data:")
+                for key, value in metadata["exif"].items():
+                    print(f"  {key}: {value}")
+            if metadata.get("gps_coordinates"):
+                print(f"\nGPS Coordinates: {metadata['gps_coordinates']}")
+            if metadata.get("timestamp"):
+                print(f"Timestamp: {metadata['timestamp']}")
+            if metadata.get("camera_model"):
+                print(f"Camera: {metadata['camera_model']}")
+            print("=====================\n")
+
+            return metadata
+        except Exception as e:
+            print(f"Error extracting metadata: {e}")
+            return {}
 
     def _extract_exif(self, image: Image) -> Optional[Dict]:
         """Extract EXIF data from image"""
