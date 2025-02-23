@@ -2,87 +2,63 @@ import overpy
 import requests
 from typing import Dict, List, Optional
 import json
+from .enhanced_search import EnhancedLocationSearch
 
 
 class GeoDataInterface:
     def __init__(self, geonames_username: str = None):
         self.osm_api = overpy.Overpass()
         self.geonames_username = geonames_username
+        self.enhanced_search = EnhancedLocationSearch(geonames_username)
 
-    def search_location_candidates(self, features: Dict, location: str = None) -> List[Dict]:
-        """Simplified location search using a single OSM query"""
-        candidates = []
+    async def search_location_candidates(self, features: Dict, location_hint: str = None, metadata: Dict = None) -> List[Dict]:
+        """Enhanced location search using multiple sources"""
+        # Get candidates from enhanced search
+        enhanced_candidates = await self.enhanced_search.find_location_candidates(features, metadata=metadata, location_hint=location_hint)
 
-        # Get coordinates from location name if provided
-        initial_coords = None
-        if location and self.geonames_username:
-            initial_coords = self._get_location_coordinates(location)
-            if initial_coords:
-                candidates.append(
-                    {
-                        "source": "provided_location",
-                        "name": location,
-                        "lat": initial_coords["lat"],
-                        "lon": initial_coords["lon"],
-                        "confidence": 0.8,
-                        "type": "location",
-                    }
-                )
+        # Get traditional OSM candidates (limit to 5 for performance)
+        osm_candidates = []
+        if features.get("landmarks") or features.get("extracted_text", {}).get("business_names"):
+            osm_candidates = self._search_osm(features, self._get_location_coordinates(location_hint) if location_hint else None)[:5]
 
-        # Build a single optimized query
-        try:
-            # Extract key search terms
-            search_terms = []
-            if features.get("landmarks"):
-                # Filter out "None" or empty landmarks
-                valid_landmarks = [landmark for landmark in features["landmarks"] if landmark and not landmark.lower().startswith("none")]
-                search_terms.extend(valid_landmarks[:2])  # Limit to 2 landmarks
+        # Get business-specific candidates if business names are present
+        business_candidates = []
+        if features.get("extracted_text", {}).get("business_names"):
+            business_candidates = self._search_businesses(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
 
-            if features.get("extracted_text", {}).get("business_names"):
-                search_terms.extend(features["extracted_text"]["business_names"][:2])
+        # Get transport infrastructure candidates if relevant features exist
+        transport_candidates = []
+        if any("tram" in f.lower() or "station" in f.lower() for f in features.get("geographic_features", [])):
+            transport_candidates = self._search_transport_infrastructure(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
 
-            if not search_terms:
-                print("No valid search terms found in features")
-                return candidates
+        # Get cultural landmark candidates
+        cultural_candidates = []
+        if features.get("landmarks") or features.get("architecture_style"):
+            cultural_candidates = self._search_cultural_landmarks(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
 
-            # Single query combining all search terms
-            query = f"""
-            [out:json][timeout:10];
-            (
-              // Search for key locations
-              node["name"~"{"|".join(search_terms)}",i]
-                ({initial_coords['bbox']['south'] if initial_coords else -90},
-                 {initial_coords['bbox']['west'] if initial_coords else -180},
-                 {initial_coords['bbox']['north'] if initial_coords else 90},
-                 {initial_coords['bbox']['east'] if initial_coords else 180});
-            );
-            out body;
-            """
+        # Combine all candidates
+        all_candidates = (
+            enhanced_candidates  # Enhanced search results (Google + OSM)
+            + osm_candidates  # Basic OSM search
+            + business_candidates  # Business-specific search
+            + transport_candidates  # Transport infrastructure
+            + cultural_candidates  # Cultural landmarks
+        )
 
-            print("\n=== OSM Query ===")
-            print(f"Search Terms: {search_terms}")
-            print(f"Initial Coords: {initial_coords}")
-            print("=================\n")
+        # Deduplicate and rank candidates
+        ranked_candidates = self._rank_candidates(all_candidates, features)
 
-            response = self.osm_api.query(query)
+        # Print summary for debugging
+        print("\n=== Location Candidates ===")
+        print(f"Enhanced Search: {len(enhanced_candidates)} results")
+        print(f"OSM Basic: {len(osm_candidates)} results")
+        print(f"Business: {len(business_candidates)} results")
+        print(f"Transport: {len(transport_candidates)} results")
+        print(f"Cultural: {len(cultural_candidates)} results")
+        print(f"Total after ranking: {len(ranked_candidates)} results")
+        print("=======================\n")
 
-            for node in response.nodes:
-                candidates.append(
-                    {
-                        "source": "osm",
-                        "name": node.tags.get("name", "Unknown"),
-                        "lat": float(node.lat),
-                        "lon": float(node.lon),
-                        "confidence": 0.7,
-                        "type": "poi",
-                        "metadata": dict(node.tags),
-                    }
-                )
-
-        except Exception as e:
-            print(f"OSM query error: {e}")
-
-        return candidates
+        return ranked_candidates[:10]  # Return top 10 candidates
 
     def _get_location_coordinates(self, location: str) -> Optional[Dict]:
         """Get coordinates for a location string using GeoNames"""

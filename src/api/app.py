@@ -69,7 +69,7 @@ async def locate_image(image: UploadFile, save_image: Optional[bool] = False, lo
 
         # Process the image
         features, description = image_analyzer.analyze_image(file_path)
-        candidates = geo_interface.search_location_candidates(features, location)
+        candidates = await geo_interface.search_location_candidates(features, location)
         final_location = location_resolver.resolve_location(features, candidates, description, location)
 
         # Clean up if not saving

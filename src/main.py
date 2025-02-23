@@ -53,7 +53,7 @@ class GeoLocator:
 
         # Get location candidates
         print("\n=== Getting Location Candidates ===")
-        candidates = await self._get_location_candidates(features, initial_location)
+        candidates = await self.geo_interface.search_location_candidates(features, initial_location)
         print(f"✓ Found {len(candidates)} initial candidates")
 
         # Add OSV5M prediction to candidates if available
