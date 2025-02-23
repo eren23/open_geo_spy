@@ -95,8 +95,8 @@ class MetadataExtractor:
         if "DateTime" in exif:
             try:
                 analysis["timestamp"] = datetime.datetime.strptime(exif["DateTime"], "%Y:%m:%d %H:%M:%S")
-            except:
-                pass
+            except ValueError as e:
+                print(f"Error parsing timestamp: {e}")
 
         # Extract camera info
         if "Make" in exif and "Model" in exif:

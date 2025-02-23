@@ -34,11 +34,15 @@ class GeoDataInterface:
             # Extract key search terms
             search_terms = []
             if features.get("landmarks"):
-                search_terms.extend(features["landmarks"][:2])  # Limit to 2 landmarks
+                # Filter out "None" or empty landmarks
+                valid_landmarks = [landmark for landmark in features["landmarks"] if landmark and not landmark.lower().startswith("none")]
+                search_terms.extend(valid_landmarks[:2])  # Limit to 2 landmarks
+
             if features.get("extracted_text", {}).get("business_names"):
-                search_terms.extend(features["extracted_text"]["business_names"][:2])  # Limit to 2 businesses
+                search_terms.extend(features["extracted_text"]["business_names"][:2])
 
             if not search_terms:
+                print("No valid search terms found in features")
                 return candidates
 
             # Single query combining all search terms

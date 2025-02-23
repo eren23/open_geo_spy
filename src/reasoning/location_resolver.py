@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional
-import requests
+
+# TODO: requests is currently unused
+# import requests
 from openai import OpenAI
 
 

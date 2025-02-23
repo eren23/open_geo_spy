@@ -6,8 +6,10 @@ from typing import Optional, List
 from datetime import datetime
 import uuid
 import tempfile
-from PIL import Image
-import io
+
+# TODO: Currently unused imports
+# from PIL import Image
+# import io
 import base64
 
 from image_analysis.analyzer import ImageAnalyzer

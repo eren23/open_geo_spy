@@ -4,6 +4,7 @@ from geo_data import GeoDataInterface
 from reasoning import LocationResolver
 from config import CONFIG
 import os
+import asyncio
 
 
 class GeoLocator:
@@ -69,7 +70,7 @@ class GeoLocator:
         return candidates + visual_matches
 
 
-def process_images_in_directory(directory: str = "/app/images"):
+async def process_images_in_directory(directory: str = "/app/images"):
     """Process all images in the specified directory"""
     locator = GeoLocator()
 
@@ -92,7 +93,7 @@ def process_images_in_directory(directory: str = "/app/images"):
         print(f"\nProcessing image: {image_file}")
 
         try:
-            result = locator.process_image(image_path)
+            result = await locator.process_image(image_path)
 
             print("Predicted Location:")
             print(f"Name: {result['name']}")
@@ -106,7 +107,7 @@ def process_images_in_directory(directory: str = "/app/images"):
 
 
 def main():
-    process_images_in_directory()
+    asyncio.run(process_images_in_directory())
 
 
 if __name__ == "__main__":
