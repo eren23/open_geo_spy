@@ -5,6 +5,8 @@ from reasoning import LocationResolver
 from config import CONFIG
 import os
 import asyncio
+from PIL import Image
+from models.osv5m_predictor import OSV5MPredictor
 
 
 class GeoLocator:
@@ -14,44 +16,69 @@ class GeoLocator:
         self.visual_search = VisualSearchEngine(google_api_key=CONFIG.GOOGLE_API_KEY, bing_api_key=CONFIG.BING_API_KEY)
         self.geo_interface = GeoDataInterface(geonames_username=CONFIG.GEONAMES_USERNAME)
         self.location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
+        self.osv5m_predictor = OSV5MPredictor()
 
     async def process_image(self, image_path: str):
-        """Full processing pipeline with detailed logging"""
+        """Full processing pipeline with enhanced model predictions"""
         print("\n=== Starting Image Processing ===")
         print(f"Image: {image_path}")
 
         # Extract metadata
         metadata = self.metadata_extractor.extract_metadata(image_path)
         initial_location = self._get_initial_location(metadata)
-
         if initial_location:
             print("\nInitial Location from Metadata:")
             print(f"Coordinates: {initial_location['lat']}, {initial_location['lon']}")
 
-        # Analyze image
-        features, description = self.image_analyzer.analyze_image(image_path)
+        # Get OSV5M prediction
+        try:
+            print("\n=== Attempting OSV5M Prediction ===")
+            image = Image.open(image_path)
+            osv5m_result, osv5m_confidence = self.osv5m_predictor.predict(image)
+            if osv5m_result:
+                print("\nOSV5M Model Prediction:")
+                print(f"Location: {osv5m_result['name']}")
+                print(f"Coordinates: {osv5m_result['lat']}, {osv5m_result['lon']}")
+                print(f"Confidence: {osv5m_confidence}")
+            else:
+                print("! No OSV5M prediction available")
+        except Exception as e:
+            print(f"! Error getting OSV5M prediction: {e}")
+            osv5m_result = None
 
-        print("\n=== Image Analysis Results ===")
-        print("Description:", description)
-        print("\nExtracted Features:")
-        for key, value in features.items():
-            print(f"{key}: {value}")
+        # Analyze image with VLM
+        print("\n=== Starting VLM Analysis ===")
+        features, description = self.image_analyzer.analyze_image(image_path)
+        print("✓ VLM Analysis complete")
 
         # Get location candidates
+        print("\n=== Getting Location Candidates ===")
         candidates = await self._get_location_candidates(features, initial_location)
+        print(f"✓ Found {len(candidates)} initial candidates")
 
-        print("\n=== Location Candidates ===")
-        for candidate in candidates:
-            print(f"- {candidate['name']} ({candidate['lat']}, {candidate['lon']}) " f"[{candidate['confidence']}] from {candidate['source']}")
+        # Add OSV5M prediction to candidates if available
+        if osv5m_result:
+            osv5m_result["confidence"] = osv5m_confidence
+            candidates.append(osv5m_result)
+            print("✓ Added OSV5M prediction to candidates")
 
-        # Resolve final location
-        result = self.location_resolver.resolve_location(features=features, candidates=candidates, description=description, metadata=metadata)
+        # Resolve final location with weighted consideration
+        print("\n=== Resolving Final Location ===")
+        result = self.location_resolver.resolve_location(
+            features=features,
+            candidates=candidates,
+            description=description,
+            metadata=metadata,
+            osv5m_prediction=osv5m_result if osv5m_result and osv5m_confidence > 0.7 else None,
+        )
 
-        print("\n=== Final Location ===")
-        print(f"Name: {result['name']}")
+        print("\n=== Final Result ===")
+        print(f"Location: {result['name']}")
         print(f"Coordinates: {result['lat']}, {result['lon']}")
         print(f"Confidence: {result['confidence']}")
-        print(f"Reasoning: {result.get('reasoning', 'Not provided')}")
+        print(f"Source: {result.get('source', 'unknown')}")
+        if result.get("reasoning"):
+            print(f"Reasoning: {result['reasoning']}")
         print("===========================\n")
 
         return result

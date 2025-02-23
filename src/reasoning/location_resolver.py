@@ -9,22 +9,21 @@ class LocationResolver:
     def __init__(self, llm_api_key: str):
         self.client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=llm_api_key)
 
-    def resolve_location(self, image_features: Dict, location_candidates: List[Dict], image_description: str, location_hint: str = None) -> Dict:
-        """Use LLM to reason about the most likely location through multiple refinement steps"""
-        # Step 1: Initial location resolution
-        initial_location = self._initial_resolution(image_features, location_candidates, image_description, location_hint)
+    def resolve_location(self, features: Dict, candidates: List[Dict], description: str, metadata: Dict = None, osv5m_prediction: Dict = None) -> Dict:
+        """Enhanced location resolution considering multiple models"""
+        # Get initial resolution
+        initial_location = self._initial_resolution(features, candidates, description)
 
-        # Step 2: Refine with business/landmark verification
+        # If OSV5M prediction is highly confident, bias towards it
+        if osv5m_prediction and osv5m_prediction.get("confidence", 0) > 0.8:
+            # Merge OSV5M prediction with initial resolution
+            initial_location = self._merge_predictions(initial_location, osv5m_prediction)
+
+        # Continue with existing refinement steps
         if initial_location and initial_location["confidence"] > 0.7:
-            refined_location = self._refine_with_business_verification(initial_location, image_features)
+            refined_location = self._refine_with_business_verification(initial_location, features)
             if refined_location:
                 initial_location = refined_location
-
-        # Step 3: Refine with street-level details
-        if initial_location and initial_location["confidence"] > 0.8:
-            street_level_location = self._refine_with_street_details(initial_location, image_features)
-            if street_level_location:
-                initial_location = street_level_location
 
         return initial_location
 
@@ -247,3 +246,23 @@ class LocationResolver:
         except Exception as e:
             print(f"Error parsing LLM response: {e}")
             return fallback
+
+    def _merge_predictions(self, vlm_pred: Dict, osv5m_pred: Dict) -> Dict:
+        """Merge predictions from different models"""
+        # If VLM is very confident, keep it
+        if vlm_pred.get("confidence", 0) > 0.85:
+            return vlm_pred
+
+        # If OSV5M is very confident, prefer it
+        if osv5m_pred.get("confidence", 0) > 0.85:
+            return osv5m_pred
+
+        # Otherwise merge them
+        return {
+            "name": f"{vlm_pred['name']} / {osv5m_pred['name']}",
+            "lat": (vlm_pred["lat"] + osv5m_pred["lat"]) / 2,
+            "lon": (vlm_pred["lon"] + osv5m_pred["lon"]) / 2,
+            "confidence": max(vlm_pred.get("confidence", 0), osv5m_pred.get("confidence", 0)),
+            "source": "hybrid",
+            "type": "merged_prediction",
+        }
