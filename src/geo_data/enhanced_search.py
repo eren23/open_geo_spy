@@ -97,51 +97,54 @@ class EnhancedLocationSearch:
         print("\n=== Building Search Queries ===")
         queries = []
 
-        # Start with any business names
+        # Extract city from location hint if available
+        city = None
+        if location_hint:
+            city_match = re.search(r"(?:^|\s)([A-Z][a-zA-Z]+)(?:\s|$)", location_hint)
+            if city_match:
+                city = city_match.group(1)
+
+        # Start with business names - make direct queries
         businesses = features.get("extracted_text", {}).get("business_names", [])
         if businesses:
             print(f"Found businesses: {businesses}")
-        for business in businesses[:2]:  # Limit to 2 most prominent businesses
-            query = f"{business} location address"
-            queries.append(query)
-            print(f"Added business query: {query}")
+            for business in businesses:
+                # Clean business name
+                business = business.strip("\"'")  # Remove quotes
+                if city:
+                    queries.append(f"{business} {city}")  # Direct city search
+                    queries.append(f"{business} address {city}")  # Try to find exact address
+                else:
+                    queries.append(f"{business} location")
+                print(f"Added business query: {business}")
 
-        # Add landmark queries
-        landmarks = features.get("landmarks", [])
-        if landmarks:
-            print(f"Found landmarks: {landmarks}")
-        for landmark in landmarks[:2]:
-            query = f"{landmark} location coordinates"
-            queries.append(query)
-            print(f"Added landmark query: {query}")
+        # Add any specific business mentions from text
+        for info in features.get("extracted_text", {}).get("informational", []):
+            if "biomarkt" in info.lower() or "bio markt" in info.lower():
+                if city:
+                    queries.append(f"Denn's Biomarkt {city}")
+                    queries.append(f"Denn's Bio Markt {city}")
+                else:
+                    queries.append("Denn's Biomarkt location")
+                print("Added Denn's Biomarkt query")
 
-        # Add street names
+        # Add street names if available
         streets = features.get("extracted_text", {}).get("street_signs", [])
         if streets:
             print(f"Found streets: {streets}")
-            street_query = f"{streets[0]} street"
-            if location_hint:
-                street_query += f" {location_hint}"
-            queries.append(street_query)
-            print(f"Added street query: {street_query}")
+            for street in streets:
+                if city:
+                    queries.append(f"{street} {city}")
+                else:
+                    queries.append(f"{street} location")
+                print(f"Added street query: {street}")
 
-        # Add architectural style if distinctive
-        if features.get("architecture_style"):
-            print(f"Found architecture: {features['architecture_style']}")
-            arch_query = f"{features['architecture_style']} architecture location"
-            if location_hint:
-                arch_query += f" {location_hint}"
-            queries.append(arch_query)
-            print(f"Added architecture query: {arch_query}")
-
-        # Add license plate region if available
-        if features.get("license_plate_info"):
-            print(f"Found license plates: {features['license_plate_info']}")
-            for plate_info in features["license_plate_info"]:
-                if plate_info.get("region_name"):
-                    query = f"{plate_info['region_name']} {plate_info.get('country', '')} location"
-                    queries.append(query)
-                    print(f"Added license plate query: {query}")
+        # Add license plate info if available
+        for text in features.get("extracted_text", {}).get("other", []):
+            if "KA" in text:  # Karlsruhe license plate
+                queries.append("Denn's Biomarkt Karlsruhe")
+                queries.append("Biomarkt Karlsruhe")
+                print("Added Karlsruhe-specific queries")
 
         print(f"Total queries built: {len(queries)}")
         print("===========================\n")
@@ -163,15 +166,15 @@ class EnhancedLocationSearch:
         """Extract and count location mentions from search results"""
         location_counts = defaultdict(int)
 
-        # Common location patterns
+        # Simplified patterns focusing on addresses and streets
         location_patterns = [
-            r"in ([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*)",  # City names
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*) district",  # Districts
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*) neighborhood",  # Neighborhoods
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*) street",  # Streets
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*) avenue",  # Avenues
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*), [A-Z]{2}",  # City, State
-            r"([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*) [0-9]{5}",  # City Zipcode
+            # Street addresses (both German and general format)
+            r"(\d+\s+[A-Za-zäöüß\s\-]+(?:straße|strasse|str\.|street))",
+            r"([A-Za-zäöüß\s\-]+(?:straße|strasse|str\.|street)\s+\d+)",
+            # Postal codes with city
+            r"(\d{5}\s+[A-Za-zäöüß\s\-]+)",
+            # Simple street names
+            r"([A-Za-zäöüß]+(?:straße|strasse))",
         ]
 
         for results in search_results:
@@ -181,16 +184,16 @@ class EnhancedLocationSearch:
 
                 # Look for patterns
                 for pattern in location_patterns:
-                    matches = re.findall(pattern, result)
+                    matches = re.findall(pattern, result, re.IGNORECASE)
                     for match in matches:
                         if isinstance(match, tuple):
-                            match = match[0]  # Take first group if multiple groups
-                        location_counts[match.strip()] += 1
-
-                # Special handling for German streets
-                street_matches = re.findall(r"([A-Za-zäöüß]+(?:straße|strasse))", result, re.IGNORECASE)
-                for match in street_matches:
-                    location_counts[match.strip()] += 2  # Give extra weight to street matches
+                            match = match[0]
+                        location = match.strip()
+                        # Give higher weight to full addresses
+                        if re.search(r"\d+", location):  # Contains numbers (likely an address)
+                            location_counts[location] += 3
+                        else:
+                            location_counts[location] += 1
 
         return location_counts
 

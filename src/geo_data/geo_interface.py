@@ -3,6 +3,7 @@ import requests
 from typing import Dict, List, Optional
 import json
 from .enhanced_search import EnhancedLocationSearch
+import re
 
 
 class GeoDataInterface:
@@ -13,28 +14,49 @@ class GeoDataInterface:
 
     async def search_location_candidates(self, features: Dict, location_hint: str = None, metadata: Dict = None) -> List[Dict]:
         """Enhanced location search using multiple sources"""
+        # Convert location hint to coordinates if provided
+        initial_coords = None
+        if location_hint:
+            # Try to extract coordinates from the hint
+            coords_match = re.search(r"(\d+\.?\d*),\s*(\d+\.?\d*)", location_hint)
+            if coords_match:
+                lat, lon = map(float, coords_match.groups())
+                initial_coords = {"lat": lat, "lon": lon, "confidence": 0.9 if "confidence" in location_hint.lower() else 0.7}
+            else:
+                # Try to geocode the location name
+                try:
+                    coords = self._get_location_coordinates(location_hint)
+                    if coords:
+                        initial_coords = {
+                            "lat": coords["lat"],
+                            "lon": coords["lon"],
+                            "confidence": 0.8 if location_hint.lower() in ["germany", "deutschland"] else 0.6,
+                        }
+                except Exception as e:
+                    print(f"Error geocoding location hint: {e}")
+
         # Get candidates from enhanced search
         enhanced_candidates = await self.enhanced_search.find_location_candidates(features, metadata=metadata, location_hint=location_hint)
 
         # Get traditional OSM candidates (limit to 5 for performance)
         osm_candidates = []
         if features.get("landmarks") or features.get("extracted_text", {}).get("business_names"):
-            osm_candidates = self._search_osm(features, self._get_location_coordinates(location_hint) if location_hint else None)[:5]
+            osm_candidates = self._search_osm(features, initial_coords)[:5]
 
         # Get business-specific candidates if business names are present
         business_candidates = []
         if features.get("extracted_text", {}).get("business_names"):
-            business_candidates = self._search_businesses(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
+            business_candidates = self._search_businesses(features, initial_coords)[:3]
 
         # Get transport infrastructure candidates if relevant features exist
         transport_candidates = []
         if any("tram" in f.lower() or "station" in f.lower() for f in features.get("geographic_features", [])):
-            transport_candidates = self._search_transport_infrastructure(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
+            transport_candidates = self._search_transport_infrastructure(features, initial_coords)[:3]
 
         # Get cultural landmark candidates
         cultural_candidates = []
         if features.get("landmarks") or features.get("architecture_style"):
-            cultural_candidates = self._search_cultural_landmarks(features, self._get_location_coordinates(location_hint) if location_hint else None)[:3]
+            cultural_candidates = self._search_cultural_landmarks(features, initial_coords)[:3]
 
         # Combine all candidates
         all_candidates = (
@@ -46,7 +68,7 @@ class GeoDataInterface:
         )
 
         # Deduplicate and rank candidates
-        ranked_candidates = self._rank_candidates(all_candidates, features)
+        ranked_candidates = self._rank_candidates(all_candidates, features, initial_coords)
 
         # Print summary for debugging
         print("\n=== Location Candidates ===")
@@ -523,42 +545,91 @@ class GeoDataInterface:
         return min(score, 1.0)
 
     def _build_osm_query(self, features: Dict, initial_coords: Optional[Dict] = None) -> str:
-        """Build OSM query based on features and location constraints"""
-        # Build area constraints
-        area_bounds = (
-            f"({initial_coords['bbox']['south']},{initial_coords['bbox']['west']}," f"{initial_coords['bbox']['north']},{initial_coords['bbox']['east']})"
-            if initial_coords
-            else "(-90,-180,90,180)"
-        )
+        """Build optimized OSM query with location constraints"""
+        # Define search radius based on confidence and location type
+        if initial_coords:
+            confidence = initial_coords.get("confidence", 0.5)
+            # If we have a street address, use a very small radius (500m)
+            if any(
+                "straße" in str(f).lower() or "strasse" in str(f).lower() or "street" in str(f).lower()
+                for f in features.get("extracted_text", {}).get("street_signs", [])
+            ):
+                radius_km = 0.5
+            # If we have high confidence (>0.8), use smaller radius (2km)
+            elif confidence > 0.8:
+                radius_km = 2
+            # For medium confidence (0.5-0.8), use medium radius (5km)
+            elif confidence > 0.5:
+                radius_km = 5
+            # For low confidence (<0.5), use larger radius (10km)
+            else:
+                radius_km = 10
 
-        # Build feature filters
-        filters = []
+            # Calculate bounding box
+            from math import radians, cos, sin, asin, sqrt
 
-        # Add architectural style filter if present
-        if features.get("architecture_style"):
-            style = features["architecture_style"].replace('"', '\\"')  # Escape quotes
-            filters.append(f'["architecture"~"{style}",i]')
+            lat = float(initial_coords.get("lat", 0))
+            lon = float(initial_coords.get("lon", 0))
 
-        # Add landmark filters
-        for landmark in features.get("landmarks", []):
-            safe_landmark = landmark.replace('"', '\\"')  # Escape quotes
-            filters.append(f'["name"~"{safe_landmark}",i]')
+            # Rough approximation of km to degrees
+            # 1 degree latitude = ~111km
+            # 1 degree longitude = ~111km * cos(latitude)
+            lat_offset = radius_km / 111.0
+            lon_offset = radius_km / (111.0 * cos(radians(lat)))
 
-        # Add business name filters
+            area_bounds = f"({lat - lat_offset},{lon - lon_offset},{lat + lat_offset},{lon + lon_offset})"
+        else:
+            area_bounds = "(47.0,5.0,55.0,15.0)"  # Default to rough Germany bounds if no coords
+
+        # Build query parts for each feature type
+        query_parts = []
+
+        # Add street name queries first (highest priority)
+        for street in features.get("extracted_text", {}).get("street_signs", []):
+            safe_name = street.replace('"', '\\"')
+            # Search for the exact street
+            query_parts.append(f'way["highway"]["name"~"^{safe_name}$",i]{area_bounds};')
+            # Also search for streets containing this name
+            query_parts.append(f'way["highway"]["name"~"{safe_name}",i]{area_bounds};')
+
+        # Add business name queries
         for business in features.get("extracted_text", {}).get("business_names", []):
-            safe_business = business.replace('"', '\\"')  # Escape quotes
-            filters.append(f'["name"~"{safe_business}",i]')
+            safe_name = business.replace('"', '\\"')
+            # Search for exact business name match
+            query_parts.append(f'node["name"~"^{safe_name}$",i]{area_bounds};')
+            query_parts.append(f'way["name"~"^{safe_name}$",i]{area_bounds};')
+            # Also search for businesses containing this name
+            query_parts.append(f'node["name"~"{safe_name}",i]["shop"]{area_bounds};')
+            query_parts.append(f'way["name"~"{safe_name}",i]["shop"]{area_bounds};')
 
-        # Combine filters
-        filter_str = "".join(filters) if filters else ""
+        # Add landmark queries
+        for landmark in features.get("landmarks", []):
+            safe_name = landmark.replace('"', '\\"')
+            query_parts.append(f'node["historic"~"."]["name"~"{safe_name}",i]{area_bounds};')
+            query_parts.append(f'way["historic"~"."]["name"~"{safe_name}",i]{area_bounds};')
+            # Also search for general amenities and buildings with this name
+            query_parts.append(f'node["amenity"]["name"~"{safe_name}",i]{area_bounds};')
+            query_parts.append(f'way["amenity"]["name"~"{safe_name}",i]{area_bounds};')
 
-        # Build complete query with reasonable timeout
+        # Add architectural style queries
+        if features.get("architecture_style"):
+            style = features["architecture_style"].replace('"', '\\"')
+            query_parts.append(f'way["building"]["architecture"~"{style}",i]{area_bounds};')
+            # Also search for historic buildings with this style
+            query_parts.append(f'way["historic"]["architecture"~"{style}",i]{area_bounds};')
+
+        # Combine all query parts
+        if not query_parts:
+            # Fallback to general amenity search if no specific features
+            query_parts = [f'node["amenity"]{area_bounds};', f'way["amenity"]{area_bounds};']
+
+        # Add shorter timeout for more focused searches
+        timeout = 10 if initial_coords and initial_coords.get("confidence", 0) > 0.7 else 25
+
         query = f"""
-        [out:json][timeout:15];
+        [out:json][timeout:{timeout}];
         (
-          node{filter_str}{area_bounds};
-          way{filter_str}{area_bounds};
-          relation{filter_str}{area_bounds};
+            {chr(10).join(query_parts)}
         );
         out body;
         >;
