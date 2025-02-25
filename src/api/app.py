@@ -20,10 +20,10 @@ import google.generativeai as genai
 
 app = FastAPI(title="GeoLocator API")
 
-# Configure CORS
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust in production
+    allow_origins=["http://localhost:3000"],  # Frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -200,7 +200,7 @@ async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Op
                 features["time_of_day"] = section.split("\n")[1].split("[")[0].strip("* ")
 
         # Use existing pipeline to find location
-        candidates = geo_interface.search_location_candidates(features, location)
+        candidates = await geo_interface.search_location_candidates(features, location)
         final_location = location_resolver.resolve_location(features, candidates, analysis_text, location)
 
         # Save files if requested

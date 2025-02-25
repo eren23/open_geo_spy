@@ -27,3 +27,18 @@ services:
           ignore:
             - "**/__pycache__"
             - "**/*.pyc"
+
+  frontend:
+    build: 
+      context: ./fe
+      dockerfile: Dockerfile
+    container_name: geolocator-frontend
+    volumes:
+      - ./fe:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - geolocator
