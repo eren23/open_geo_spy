@@ -5,13 +5,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import re
 from collections import defaultdict
-import requests
-from bs4 import BeautifulSoup
-import logging
-from urllib.parse import urlparse, unquote
-import json
-
-logger = logging.getLogger("geolocator_client")
 
 
 class EnhancedLocationSearch:
@@ -20,186 +13,6 @@ class EnhancedLocationSearch:
         self.geonames_username = geonames_username
         self.max_google_results = max_google_results
         self.max_osm_queries = max_osm_queries
-
-    def _extract_structured_data(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
-        """Extract structured address data from schema.org markup"""
-        addresses = []
-
-        # Look for schema.org structured data
-        for item in soup.find_all(["script", "div", "span"], attrs={"type": "application/ld+json"}):
-            try:
-                data = json.loads(item.string)
-                if isinstance(data, dict):
-                    self._extract_address_from_schema(data, addresses)
-                elif isinstance(data, list):
-                    for entry in data:
-                        if isinstance(entry, dict):
-                            self._extract_address_from_schema(entry, addresses)
-            except:
-                continue
-
-        # Look for address elements
-        for addr in soup.find_all(["address", "div"], class_=lambda x: x and any(c in x.lower() for c in ["address", "location", "contact"])):
-            address = self._parse_address_element(addr)
-            if address:
-                addresses.append(address)
-
-        return addresses
-
-    def _parse_address_element(self, element) -> Optional[Dict[str, str]]:
-        """Parse an HTML element containing address information"""
-        text = element.get_text(separator=" ", strip=True)
-
-        # Skip if text is too short or doesn't look like an address
-        if len(text) < 10 or not any(x in text.lower() for x in ["straße", "strasse", "str.", "platz", "allee"]):
-            return None
-
-        # Try to identify address components
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
-
-        address = {}
-        for line in lines:
-            line = line.strip(",")
-            # Look for postal code and city
-            if re.match(r"^\d{5}\s+\w+", line):
-                postal_city = line.split(None, 1)
-                address["postal_code"] = postal_city[0]
-                address["city"] = postal_city[1]
-            # Look for street and number
-            elif any(x in line.lower() for x in ["straße", "strasse", "str.", "platz", "allee"]):
-                parts = line.split()
-                if parts[-1].replace("-", "").isdigit():  # Number at end
-                    address["street"] = " ".join(parts[:-1])
-                    address["number"] = parts[-1]
-                elif parts[0].replace("-", "").isdigit():  # Number at start
-                    address["number"] = parts[0]
-                    address["street"] = " ".join(parts[1:])
-
-        return address if "street" in address else None
-
-    async def _fetch_webpage_content(self, url: str) -> Optional[Dict]:
-        """Fetch and extract content from webpage"""
-        try:
-            if "/search?" in url:
-                return None
-
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            }
-
-            async with asyncio.timeout(10):
-                response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, "html.parser")
-
-                # Remove non-content elements
-                for tag in soup(["script", "style", "meta", "link", "noscript"]):
-                    tag.decompose()
-
-                # Extract addresses from structured data
-                structured_addresses = self._extract_structured_data(soup)
-
-                # Extract addresses from contact/location sections
-                contact_sections = soup.find_all(
-                    ["div", "section"], class_=lambda x: x and any(c in x.lower() for c in ["contact", "location", "address", "footer"])
-                )
-
-                section_addresses = []
-                for section in contact_sections:
-                    addr = self._parse_address_element(section)
-                    if addr:
-                        section_addresses.append(addr)
-
-                return {
-                    "url": url,
-                    "structured_addresses": structured_addresses,
-                    "section_addresses": section_addresses,
-                    "title": soup.title.string if soup.title else None,
-                }
-
-        except Exception as e:
-            logger.debug(f"Error fetching {url}: {str(e)}")
-        return None
-
-    async def _analyze_search_results(self, search_results: List[str]) -> List[Dict[str, str]]:
-        """Analyze search results to find addresses"""
-        addresses = []
-        seen_addresses = set()
-
-        # Fetch and analyze webpage content
-        tasks = []
-        for url in search_results:
-            if not url.startswith("/search"):
-                tasks.append(self._fetch_webpage_content(url))
-
-        contents = await asyncio.gather(*tasks)
-
-        for content in contents:
-            if not content:
-                continue
-
-            # Process structured addresses
-            for addr in content["structured_addresses"]:
-                addr_key = f"{addr.get('street', '')}{addr.get('number', '')}{addr.get('city', '')}"
-                if addr_key and addr_key not in seen_addresses:
-                    seen_addresses.add(addr_key)
-                    addresses.append(addr)
-
-            # Process section addresses
-            for addr in content["section_addresses"]:
-                addr_key = f"{addr.get('street', '')}{addr.get('number', '')}{addr.get('city', '')}"
-                if addr_key and addr_key not in seen_addresses:
-                    seen_addresses.add(addr_key)
-                    addresses.append(addr)
-
-            # Extract any address from the URL itself
-            parsed_url = urlparse(content["url"])
-            path_parts = unquote(parsed_url.path).split("/")
-
-            for part in path_parts:
-                if any(x in part.lower() for x in ["strasse", "str", "allee"]):
-                    # Try to extract street and number from URL part
-                    components = part.split("-")
-                    for i, comp in enumerate(components):
-                        if comp.replace("-", "").isdigit() and i > 0:
-                            potential_street = " ".join(components[:i])
-                            if len(potential_street) > 5:  # Avoid too short strings
-                                addr = {"street": potential_street.replace("-", " ").title(), "number": comp, "city": parsed_url.netloc.split(".")[0].title()}
-                                addr_key = f"{addr['street']}{addr['number']}{addr['city']}"
-                                if addr_key not in seen_addresses:
-                                    seen_addresses.add(addr_key)
-                                    addresses.append(addr)
-
-        return addresses
-
-    async def _run_google_search(self, query: str) -> List[str]:
-        """Run Google search and return results"""
-        try:
-            results = list(search(query, num_results=5, lang="de"))  # Use German results
-            logger.info(f"Search results for '{query}':")
-            for result in results:
-                logger.info(f"- {result}")
-
-            # Analyze search results for addresses
-            addresses = await self._analyze_search_results(results)
-            if addresses:
-                logger.info("Found addresses in search results:")
-                for addr in addresses:
-                    logger.info(f"- {addr}")
-                    # Add the found address as a new search query
-                    addr_query = f"{addr.get('street', '')} {addr.get('number', '')}"
-                    if addr.get("city"):
-                        addr_query += f", {addr['city']}"
-                    if addr_query not in results:
-                        results.append(addr_query)
-
-            return results
-        except Exception as e:
-            logger.error(f"Google search error for '{query}': {e}")
-            return []
 
     async def find_location_candidates(self, features: Dict, metadata: Dict = None, location_hint: str = None) -> List[Dict]:
         """Find location candidates using multiple sources"""
@@ -336,6 +149,18 @@ class EnhancedLocationSearch:
         print(f"Total queries built: {len(queries)}")
         print("===========================\n")
         return queries
+
+    async def _run_google_search(self, query: str) -> List[str]:
+        """Run Google search and return results"""
+        try:
+            results = list(search(query, num_results=5, lang="en"))  # Limit to 5 results per query
+            print(f"Search results for '{query}':")
+            for result in results:
+                print(f"- {result}")
+            return results
+        except Exception as e:
+            print(f"Google search error for '{query}': {e}")
+            return []
 
     def _extract_locations(self, search_results: List[List[str]]) -> Dict[str, int]:
         """Extract and count location mentions from search results"""
