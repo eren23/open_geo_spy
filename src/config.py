@@ -17,6 +17,7 @@ class Config:
         self.APP_NAME = "GeoLocator"
         self.APP_URL = os.getenv("APP_URL", "https://your-app-url.com")
         self.IMAGE_DIR = os.getenv("IMAGES_DIR", "/app/images")
+        self.GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 
 CONFIG = Config()

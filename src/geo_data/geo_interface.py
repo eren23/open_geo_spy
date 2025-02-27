@@ -4,6 +4,8 @@ from typing import Dict, List, Optional
 import json
 from .enhanced_search import EnhancedLocationSearch
 import re
+import googlemaps
+from src.config import CONFIG
 
 
 class GeoDataInterface:
@@ -11,9 +13,54 @@ class GeoDataInterface:
         self.osm_api = overpy.Overpass()
         self.geonames_username = geonames_username
         self.enhanced_search = EnhancedLocationSearch(geonames_username)
+        # Initialize Google Maps client
+        self.gmaps = googlemaps.Client(key=CONFIG.GOOGLE_MAPS_API_KEY) if CONFIG.GOOGLE_MAPS_API_KEY else None
+
+    def _preprocess_features(self, features: Dict) -> Dict:
+        """Preprocess and clean up features before searching"""
+        processed = {
+            "landmarks": [],
+            "business_names": [],
+            "street_signs": [],
+            "architecture_style": features.get("architecture_style", ""),
+            "geographic_features": features.get("geographic_features", []),
+        }
+
+        # Process landmarks and extract business names
+        for landmark in features.get("landmarks", []):
+            # Clean up the text by removing quotes and descriptions
+            clean_text = landmark.split("**")[0].strip().strip("\"'")
+
+            # Check if it's actually a business
+            if any(
+                business_indicator in clean_text.lower() for business_indicator in ["markt", "store", "shop", "supermarket", "café", "restaurant", "biomarkt"]
+            ):
+                processed["business_names"].append(clean_text)
+            else:
+                processed["landmarks"].append(clean_text)
+
+        # Add any existing business names
+        processed["business_names"].extend(features.get("extracted_text", {}).get("business_names", []))
+
+        # Add street signs
+        processed["street_signs"] = features.get("extracted_text", {}).get("street_signs", [])
+
+        # Remove duplicates while preserving order
+        for key in ["landmarks", "business_names", "street_signs"]:
+            processed[key] = list(dict.fromkeys(processed[key]))
+
+        return processed
 
     async def search_location_candidates(self, features: Dict, location_hint: str = None, metadata: Dict = None) -> List[Dict]:
         """Enhanced location search using multiple sources"""
+        # Preprocess features first
+        processed_features = self._preprocess_features(features)
+        print("\n=== Processed Features ===")
+        print(f"Business Names: {processed_features['business_names']}")
+        print(f"Landmarks: {processed_features['landmarks']}")
+        print(f"Street Signs: {processed_features['street_signs']}")
+        print("========================\n")
+
         # Convert location hint to coordinates if provided
         initial_coords = None
         if location_hint:
@@ -36,27 +83,27 @@ class GeoDataInterface:
                     print(f"Error geocoding location hint: {e}")
 
         # Get candidates from enhanced search
-        enhanced_candidates = await self.enhanced_search.find_location_candidates(features, metadata=metadata, location_hint=location_hint)
+        enhanced_candidates = await self.enhanced_search.find_location_candidates(processed_features, metadata=metadata, location_hint=location_hint)
 
         # Get traditional OSM candidates (limit to 5 for performance)
         osm_candidates = []
-        if features.get("landmarks") or features.get("extracted_text", {}).get("business_names"):
-            osm_candidates = self._search_osm(features, initial_coords)[:5]
+        if processed_features["landmarks"] or processed_features["business_names"]:
+            osm_candidates = self._search_osm(processed_features, initial_coords)[:5]
 
-        # Get business-specific candidates if business names are present
+        # Get business-specific candidates
         business_candidates = []
-        if features.get("extracted_text", {}).get("business_names"):
-            business_candidates = self._search_businesses(features, initial_coords)[:3]
+        if processed_features["business_names"]:
+            business_candidates = self._search_businesses(processed_features, initial_coords)[:3]
 
         # Get transport infrastructure candidates if relevant features exist
         transport_candidates = []
-        if any("tram" in f.lower() or "station" in f.lower() for f in features.get("geographic_features", [])):
-            transport_candidates = self._search_transport_infrastructure(features, initial_coords)[:3]
+        if any("tram" in f.lower() or "station" in f.lower() for f in processed_features.get("geographic_features", [])):
+            transport_candidates = self._search_transport_infrastructure(processed_features, initial_coords)[:3]
 
         # Get cultural landmark candidates
         cultural_candidates = []
-        if features.get("landmarks") or features.get("architecture_style"):
-            cultural_candidates = self._search_cultural_landmarks(features, initial_coords)[:3]
+        if processed_features["landmarks"] or processed_features["architecture_style"]:
+            cultural_candidates = self._search_cultural_landmarks(processed_features, initial_coords)[:3]
 
         # Combine all candidates
         all_candidates = (
@@ -68,7 +115,12 @@ class GeoDataInterface:
         )
 
         # Deduplicate and rank candidates
-        ranked_candidates = self._rank_candidates(all_candidates, features, initial_coords)
+        ranked_candidates = self._rank_candidates(all_candidates, processed_features, initial_coords)
+
+        # If OSM returns no results, try Google Maps
+        if not ranked_candidates and self.gmaps:
+            google_candidates = self._search_google_maps(processed_features, initial_coords)
+            ranked_candidates.extend(google_candidates)
 
         # Print summary for debugging
         print("\n=== Location Candidates ===")
@@ -637,3 +689,69 @@ class GeoDataInterface:
         """
 
         return query
+
+    def _search_google_maps(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
+        """Search locations using Google Maps API"""
+        if not self.gmaps:
+            return []
+
+        results = []
+        try:
+            # Search for business names
+            for business in features["business_names"]:  # Use processed business names
+                print(f"\nSearching Google Maps for business: {business}")
+
+                places = self.gmaps.places(
+                    business, location=f"{initial_coords['lat']},{initial_coords['lon']}" if initial_coords else None, radius=5000 if initial_coords else None
+                )
+
+                for place in places.get("results", []):
+                    print(f"Found place: {place['name']} at {place['geometry']['location']}")
+                    results.append(
+                        {
+                            "source": "google_maps",
+                            "name": place["name"],
+                            "lat": place["geometry"]["location"]["lat"],
+                            "lon": place["geometry"]["location"]["lng"],
+                            "confidence": 0.8 if place.get("rating") else 0.6,
+                            "type": "business",
+                            "metadata": {
+                                "place_id": place["place_id"],
+                                "address": place.get("formatted_address"),
+                                "types": place.get("types", []),
+                                "rating": place.get("rating"),
+                            },
+                        }
+                    )
+
+            # Search for street addresses
+            for street in features["street_signs"]:
+                print(f"\nSearching Google Maps for street: {street}")
+
+                geocode_results = self.gmaps.geocode(
+                    street, region="de", location=f"{initial_coords['lat']},{initial_coords['lon']}" if initial_coords else None
+                )
+
+                for result in geocode_results:
+                    print(f"Found address: {result['formatted_address']}")
+                    results.append(
+                        {
+                            "source": "google_maps",
+                            "name": result["formatted_address"],
+                            "lat": result["geometry"]["location"]["lat"],
+                            "lon": result["geometry"]["location"]["lng"],
+                            "confidence": 0.85 if result.get("partial_match") else 0.95,
+                            "type": "address",
+                            "metadata": {
+                                "place_id": result["place_id"],
+                                "types": result.get("types", []),
+                                "address_components": result.get("address_components", []),
+                            },
+                        }
+                    )
+
+            return results
+
+        except Exception as e:
+            print(f"Error searching Google Maps: {e}")
+            return []
