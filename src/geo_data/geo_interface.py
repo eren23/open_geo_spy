@@ -17,39 +17,125 @@ class GeoDataInterface:
         self.gmaps = googlemaps.Client(key=CONFIG.GOOGLE_MAPS_API_KEY) if CONFIG.GOOGLE_MAPS_API_KEY else None
 
     def _preprocess_features(self, features: Dict) -> Dict:
-        """Preprocess and clean up features before searching"""
+        """Preprocess and clean up features with improved entity recognition"""
         processed = {
             "landmarks": [],
             "business_names": [],
             "street_signs": [],
+            "building_info": [],
             "architecture_style": features.get("architecture_style", ""),
             "geographic_features": features.get("geographic_features", []),
+            "entity_locations": {},  # Map entities to potential locations
         }
 
-        # Process landmarks and extract business names
+        # Process landmarks and extract business names with better classification
         for landmark in features.get("landmarks", []):
-            # Clean up the text by removing quotes and descriptions
+            # Clean up the text
             clean_text = landmark.split("**")[0].strip().strip("\"'")
 
-            # Check if it's actually a business
-            if any(
-                business_indicator in clean_text.lower() for business_indicator in ["markt", "store", "shop", "supermarket", "café", "restaurant", "biomarkt"]
-            ):
+            # Use entity type classification if available
+            entity_type = features.get("entity_types", {}).get(clean_text, self._classify_entity(clean_text))
+
+            if entity_type == "business":
                 processed["business_names"].append(clean_text)
+            elif entity_type == "street":
+                processed["street_signs"].append(clean_text)
+            elif entity_type == "building":
+                processed["building_info"].append(clean_text)
             else:
                 processed["landmarks"].append(clean_text)
 
-        # Add any existing business names
-        processed["business_names"].extend(features.get("extracted_text", {}).get("business_names", []))
+        # Add existing categorized entities
+        for category in ["business_names", "street_signs", "building_info"]:
+            processed[category].extend(features.get("extracted_text", {}).get(category, []))
 
-        # Add street signs
-        processed["street_signs"] = features.get("extracted_text", {}).get("street_signs", [])
+        # Extract potential location context from entities
+        for entity in processed["business_names"] + processed["landmarks"]:
+            location_context = self._extract_location_context(entity)
+            if location_context:
+                processed["entity_locations"][entity] = location_context
 
         # Remove duplicates while preserving order
-        for key in ["landmarks", "business_names", "street_signs"]:
+        for key in ["landmarks", "business_names", "street_signs", "building_info"]:
             processed[key] = list(dict.fromkeys(processed[key]))
 
         return processed
+
+    def _classify_entity(self, text: str) -> str:
+        """Classify an entity based on text patterns"""
+        text_lower = text.lower()
+
+        # Business indicators
+        business_indicators = [
+            "gmbh",
+            "ltd",
+            "inc",
+            "llc",
+            "co.",
+            "kg",
+            "ag",
+            "restaurant",
+            "café",
+            "cafe",
+            "hotel",
+            "shop",
+            "store",
+            "markt",
+            "market",
+            "supermarket",
+            "biomarkt",
+            "bakery",
+            "bäckerei",
+            "apotheke",
+            "pharmacy",
+            "bank",
+        ]
+
+        # Street indicators
+        street_indicators = [
+            "straße",
+            "strasse",
+            "str.",
+            "street",
+            "avenue",
+            "ave",
+            "road",
+            "rd",
+            "boulevard",
+            "blvd",
+            "lane",
+            "ln",
+            "way",
+            "allee",
+            "platz",
+            "square",
+        ]
+
+        # Building indicators
+        building_indicators = ["building", "gebäude", "haus", "house", "apartment", "apt", "suite", "floor", "etage", "no.", "nr.", "number", "hausnummer"]
+
+        if any(indicator in text_lower for indicator in business_indicators):
+            return "business"
+        elif any(indicator in text_lower for indicator in street_indicators):
+            return "street"
+        elif any(indicator in text_lower for indicator in building_indicators):
+            return "building"
+        else:
+            return "landmark"
+
+    def _extract_location_context(self, text: str) -> Optional[str]:
+        """Extract potential location context from entity text"""
+        # Look for "in [Location]" pattern
+        location_match = re.search(r"(?:in|at|near|of)\s+([A-Z][a-zA-Z\s]+)(?:,|\.|$)", text)
+        if location_match:
+            return location_match.group(1).strip()
+
+        # Look for city names after commas
+        comma_match = re.search(r",\s*([A-Z][a-zA-Z\s]+)(?:,|\.|$)", text)
+        if comma_match:
+            return comma_match.group(1).strip()
+
+        return None
 
     async def search_location_candidates(self, features: Dict, location_hint: str = None, metadata: Dict = None) -> List[Dict]:
         """Enhanced location search using multiple sources"""
@@ -72,13 +158,17 @@ class GeoDataInterface:
             else:
                 # Try to geocode the location name
                 try:
-                    coords = self._get_location_coordinates(location_hint)
-                    if coords:
-                        initial_coords = {
-                            "lat": coords["lat"],
-                            "lon": coords["lon"],
-                            "confidence": 0.8 if location_hint.lower() in ["germany", "deutschland"] else 0.6,
-                        }
+                    # Use Google Maps geocoding correctly
+                    if self.gmaps:
+                        geocode_result = self.gmaps.geocode(location_hint)
+                        if geocode_result:
+                            location = geocode_result[0]
+                            coords = {"lat": location["geometry"]["location"]["lat"], "lon": location["geometry"]["location"]["lng"]}
+                            initial_coords = {
+                                "lat": coords["lat"],
+                                "lon": coords["lon"],
+                                "confidence": 0.8 if location_hint.lower() in ["germany", "deutschland"] else 0.6,
+                            }
                 except Exception as e:
                     print(f"Error geocoding location hint: {e}")
 
@@ -310,58 +400,46 @@ class GeoDataInterface:
             return []
 
     def _search_businesses(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
-        """Search for specific businesses mentioned in features"""
+        """Search for businesses using Google Maps Places API"""
+        if not self.gmaps:
+            return []
+
         results = []
-        business_names = features.get("extracted_text", {}).get("business_names", [])
+        for business in features.get("business_names", []):
+            try:
+                # Use nearby search if we have coordinates
+                if initial_coords:
+                    places = self.gmaps.places_nearby(location=(initial_coords["lat"], initial_coords["lon"]), radius=5000, keyword=business)  # 5km radius
+                else:
+                    # Use text search otherwise
+                    places = self.gmaps.places(query=business, type="establishment")
 
-        if not business_names:
-            return results
+                if not places.get("results"):
+                    continue
 
-        try:
-            for business in business_names:
-                # Search OSM for businesses
-                query = f"""
-                [out:json][timeout:25];
-                (
-                  node["name"~"{business}",i]
-                    ({initial_coords['bbox']['south'] if initial_coords else -90},
-                     {initial_coords['bbox']['west'] if initial_coords else -180},
-                     {initial_coords['bbox']['north'] if initial_coords else 90},
-                     {initial_coords['bbox']['east'] if initial_coords else 180});
-                  way["name"~"{business}",i]
-                    ({initial_coords['bbox']['south'] if initial_coords else -90},
-                     {initial_coords['bbox']['west'] if initial_coords else -180},
-                     {initial_coords['bbox']['north'] if initial_coords else 90},
-                     {initial_coords['bbox']['east'] if initial_coords else 180});
-                );
-                out body;
-                >;
-                out skel qt;
-                """
-
-                response = self.osm_api.query(query)
-
-                for element in response.nodes:
+                for place in places["results"][:3]:  # Limit to top 3 matches
                     results.append(
                         {
-                            "source": "osm_business",
-                            "name": element.tags.get("name", business),
-                            "lat": float(element.lat),
-                            "lon": float(element.lon),
+                            "name": place["name"],
+                            "lat": place["geometry"]["location"]["lat"],
+                            "lon": place["geometry"]["location"]["lng"],
+                            "confidence": 0.8 if place.get("rating") else 0.6,
+                            "source": "google_maps",
                             "type": "business",
-                            "confidence": 0.8 if business.lower() in element.tags.get("name", "").lower() else 0.6,
                             "metadata": {
-                                "osm_id": element.id,
-                                "tags": dict(element.tags),
-                                "business_type": element.tags.get("shop") or element.tags.get("amenity"),
+                                "place_id": place["place_id"],
+                                "address": place.get("formatted_address"),
+                                "types": place.get("types", []),
+                                "rating": place.get("rating"),
                             },
                         }
                     )
 
-            return results
-        except Exception as e:
-            print(f"Error searching businesses: {e}")
-            return []
+            except Exception as e:
+                print(f"Error searching Google Maps: {e}")
+                continue
+
+        return results
 
     def _search_transport_infrastructure(self, features: Dict, initial_coords: Optional[Dict] = None) -> List[Dict]:
         """Search for transportation infrastructure like tram lines, stations, etc."""

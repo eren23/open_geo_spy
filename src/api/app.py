@@ -2,15 +2,17 @@ from fastapi import FastAPI, UploadFile, HTTPException, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 import uuid
 import tempfile
+import json
+import re
+import base64
 
 # TODO: Currently unused imports
 # from PIL import Image
 # import io
-import base64
 
 from image_analysis.analyzer import ImageAnalyzer
 from geo_data.geo_interface import GeoDataInterface
@@ -49,7 +51,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 @app.post("/api/locate")
 async def locate_image(image: UploadFile, save_image: Optional[bool] = False, location: Optional[str] = None) -> dict:
     """
-    Upload an image and get its predicted location
+    Upload an image and get its predicted location with enhanced entity extraction
     Optional location parameter can be used to narrow down the search area
     """
     if not image.content_type.startswith("image/"):
@@ -69,6 +71,19 @@ async def locate_image(image: UploadFile, save_image: Optional[bool] = False, lo
 
         # Process the image
         features, description = image_analyzer.analyze_image(file_path)
+
+        # Enhance entity extraction with Gemini
+        enhanced_features = await _enhance_entity_extraction(file_path, features, description)
+
+        # Merge enhanced features with original features
+        for key, value in enhanced_features.items():
+            if key not in features or not features[key]:
+                features[key] = value
+            elif isinstance(features[key], list) and isinstance(value, list):
+                features[key].extend([item for item in value if item not in features[key]])
+            elif isinstance(features[key], dict) and isinstance(value, dict):
+                features[key].update(value)
+
         candidates = await geo_interface.search_location_candidates(features, location)
         final_location = location_resolver.resolve_location(features, candidates, description, location)
 
@@ -89,6 +104,85 @@ async def locate_image(image: UploadFile, save_image: Optional[bool] = False, lo
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
+
+
+async def _enhance_entity_extraction(image_path: str, features: Dict, description: str) -> Dict:
+    """Use Gemini to enhance entity extraction"""
+    try:
+        # Prepare image for Gemini
+        with open(image_path, "rb") as f:
+            image_data = f.read()
+            image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+        # Create prompt for entity extraction
+        prompt = f"""
+        Analyze this image and extract the following entities with high precision:
+        
+        1. BUSINESSES: Extract all business names visible in the image
+        2. STREETS: Extract all street names visible in the image
+        3. BUILDINGS: Extract all building numbers and identifiers
+        4. LANDMARKS: Extract all landmarks visible or referenced
+        5. LOCATION_CONTEXT: Extract any city, district, or region names mentioned
+        
+        For each entity, provide:
+        - The exact text as it appears
+        - The entity type (business, street, building, landmark, location)
+        - Any additional context (e.g., "This business appears to be in Berlin")
+        - Your confidence level (0-1)
+        
+        Previous analysis found:
+        {json.dumps(features, indent=2)}
+        
+        Description: {description}
+        
+        Format your response as JSON with these categories.
+        """
+
+        # Generate response from Gemini
+        response = gemini_model.generate_content([{"text": prompt}, {"image": {"data": image_b64}}])
+
+        # Parse the response
+        try:
+            # Try to extract JSON from the response
+            json_match = re.search(r"```json\n(.*?)\n```", response.text, re.DOTALL)
+            if json_match:
+                enhanced_data = json.loads(json_match.group(1))
+            else:
+                # Try to parse the whole response as JSON
+                enhanced_data = json.loads(response.text)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, extract entities using regex
+            enhanced_data = {"BUSINESSES": [], "STREETS": [], "BUILDINGS": [], "LANDMARKS": [], "LOCATION_CONTEXT": []}
+
+            for category in enhanced_data.keys():
+                pattern = rf"{category}:(.*?)(?=\n[A-Z_]+:|$)"
+                match = re.search(pattern, response.text, re.DOTALL)
+                if match:
+                    items = [item.strip("- ") for item in match.group(1).strip().split("\n") if item.strip()]
+                    enhanced_data[category] = items
+
+        # Convert to our feature format
+        result = {
+            "extracted_text": {
+                "business_names": enhanced_data.get("BUSINESSES", []),
+                "street_signs": enhanced_data.get("STREETS", []),
+                "building_info": enhanced_data.get("BUILDINGS", []),
+            },
+            "landmarks": enhanced_data.get("LANDMARKS", []),
+            "entity_locations": {},
+        }
+
+        # Extract location contexts
+        for location in enhanced_data.get("LOCATION_CONTEXT", []):
+            for entity_type in ["BUSINESSES", "STREETS", "LANDMARKS"]:
+                for entity in enhanced_data.get(entity_type, []):
+                    result["entity_locations"][entity] = location
+
+        return result
+
+    except Exception as e:
+        print(f"Error enhancing entity extraction: {e}")
+        return {}
 
 
 @app.get("/api/health")

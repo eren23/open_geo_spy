@@ -93,62 +93,98 @@ class EnhancedLocationSearch:
         return candidates
 
     def _build_search_queries(self, features: Dict, metadata: Dict = None, location_hint: str = None) -> List[str]:
-        """Build optimized search queries from features"""
+        """Build optimized search queries with improved entity-location pairing"""
         print("\n=== Building Search Queries ===")
         queries = []
 
-        # Extract city from location hint if available
-        city = None
-        if location_hint:
-            city_match = re.search(r"(?:^|\s)([A-Z][a-zA-Z]+)(?:\s|$)", location_hint)
-            if city_match:
-                city = city_match.group(1)
+        # Extract location context from various sources
+        location_contexts = self._extract_location_contexts(features, location_hint)
+        print(f"Identified location contexts: {location_contexts}")
 
-        # Start with business names - make direct queries
-        businesses = features.get("extracted_text", {}).get("business_names", [])
+        # Process business names with location context
+        businesses = features.get("business_names", [])
         if businesses:
             print(f"Found businesses: {businesses}")
             for business in businesses:
                 # Clean business name
-                business = business.strip("\"'")  # Remove quotes
-                if city:
-                    queries.append(f"{business} {city}")  # Direct city search
-                    queries.append(f"{business} address {city}")  # Try to find exact address
+                business = business.strip("\"'")
+
+                # Check if this business has a specific location context
+                business_location = features.get("entity_locations", {}).get(business)
+
+                # Build queries with different location contexts
+                if business_location:
+                    # Use the specific location associated with this business
+                    queries.append(f"{business} {business_location}")
+                    queries.append(f"{business} address {business_location}")
+                    print(f"Added business-specific query: {business} in {business_location}")
+                elif location_contexts:
+                    # Try each location context
+                    for context in location_contexts:
+                        queries.append(f"{business} {context}")
+                        queries.append(f"{business} address {context}")
+                    print(f"Added business query with contexts: {business}")
                 else:
+                    # Generic search
                     queries.append(f"{business} location")
-                print(f"Added business query: {business}")
+                    print(f"Added generic business query: {business}")
 
-        # Add any specific business mentions from text
-        for info in features.get("extracted_text", {}).get("informational", []):
-            if "biomarkt" in info.lower() or "bio markt" in info.lower():
-                if city:
-                    queries.append(f"Denn's Biomarkt {city}")
-                    queries.append(f"Denn's Bio Markt {city}")
-                else:
-                    queries.append("Denn's Biomarkt location")
-                print("Added Denn's Biomarkt query")
-
-        # Add street names if available
-        streets = features.get("extracted_text", {}).get("street_signs", [])
+        # Process street names with location context
+        streets = features.get("street_signs", [])
         if streets:
             print(f"Found streets: {streets}")
             for street in streets:
-                if city:
-                    queries.append(f"{street} {city}")
+                if location_contexts:
+                    for context in location_contexts:
+                        queries.append(f"{street} {context}")
+                    print(f"Added street query with contexts: {street}")
                 else:
                     queries.append(f"{street} location")
-                print(f"Added street query: {street}")
+                    print(f"Added generic street query: {street}")
 
-        # Add license plate info if available
-        for text in features.get("extracted_text", {}).get("other", []):
-            if "KA" in text:  # Karlsruhe license plate
-                queries.append("Denn's Biomarkt Karlsruhe")
-                queries.append("Biomarkt Karlsruhe")
-                print("Added Karlsruhe-specific queries")
+        # Process building info with streets for more precise searches
+        buildings = features.get("building_info", [])
+        if buildings and streets:
+            for building in buildings:
+                for street in streets:
+                    queries.append(f"{building} {street}")
+                    print(f"Added building-street query: {building} {street}")
+
+        # Add combined queries for higher precision
+        if businesses and streets:
+            for business in businesses:
+                for street in streets:
+                    queries.append(f"{business} {street}")
+                    print(f"Added business-street query: {business} {street}")
 
         print(f"Total queries built: {len(queries)}")
         print("===========================\n")
         return queries
+
+    def _extract_location_contexts(self, features: Dict, location_hint: str = None) -> List[str]:
+        """Extract all potential location contexts from features and hints"""
+        contexts = set()
+
+        # Add explicit location hint
+        if location_hint:
+            contexts.add(location_hint)
+
+        # Add entity-specific locations
+        for location in features.get("entity_locations", {}).values():
+            contexts.add(location)
+
+        # Extract locations from license plate info
+        for plate_info in features.get("license_plate_info", []):
+            if "region_name" in plate_info:
+                contexts.add(plate_info["region_name"])
+
+        # Look for location names in informational text
+        for info in features.get("extracted_text", {}).get("informational", []):
+            location_match = re.search(r"(?:in|at|near)\s+([A-Z][a-zA-Z\s]+)(?:,|\.|$)", info)
+            if location_match:
+                contexts.add(location_match.group(1).strip())
+
+        return list(contexts)
 
     async def _run_google_search(self, query: str) -> List[str]:
         """Run Google search and return results"""

@@ -7,6 +7,8 @@ import os
 import asyncio
 from PIL import Image
 from models.osv5m_predictor import OSV5MPredictor
+import re
+from typing import Dict, Optional
 
 
 class GeoLocator:
@@ -19,7 +21,7 @@ class GeoLocator:
         self.osv5m_predictor = OSV5MPredictor()
 
     async def process_image(self, image_path: str):
-        """Full processing pipeline with enhanced model predictions"""
+        """Full processing pipeline with enhanced entity extraction"""
         print("\n=== Starting Image Processing ===")
         print(f"Image: {image_path}")
 
@@ -40,8 +42,14 @@ class GeoLocator:
                 print(f"Location: {osv5m_result['name']}")
                 print(f"Coordinates: {osv5m_result['lat']}, {osv5m_result['lon']}")
                 print(f"Confidence: {osv5m_confidence}")
+
+                # Extract location context from OSV5M prediction
+                if osv5m_result.get("metadata", {}).get("city"):
+                    initial_location_context = osv5m_result["metadata"]["city"]
+                    print(f"Location context from OSV5M: {initial_location_context}")
             else:
                 print("! No OSV5M prediction available")
+                osv5m_result = None
         except Exception as e:
             print(f"! Error getting OSV5M prediction: {e}")
             osv5m_result = None
@@ -51,9 +59,18 @@ class GeoLocator:
         features, description = self.image_analyzer.analyze_image(image_path)
         print("✓ VLM Analysis complete")
 
+        # Extract location context from features
+        location_context = self._extract_location_context(features, description)
+        if location_context:
+            print(f"✓ Extracted location context: {location_context}")
+
+            # Add location context to initial_location if available
+            if initial_location:
+                initial_location["context"] = location_context
+
         # Get location candidates
         print("\n=== Getting Location Candidates ===")
-        candidates = await self.geo_interface.search_location_candidates(features, initial_location)
+        candidates = await self.geo_interface.search_location_candidates(features, location_hint=location_context, metadata=metadata)
         print(f"✓ Found {len(candidates)} initial candidates")
 
         # Add OSV5M prediction to candidates if available
@@ -95,6 +112,35 @@ class GeoLocator:
         candidates = self.geo_interface.search_location_candidates(features)
         visual_matches = await self.visual_search.find_similar_locations(features, initial_location)
         return candidates + visual_matches
+
+    def _extract_location_context(self, features: Dict, description: str) -> Optional[str]:
+        """Extract location context from features and description"""
+        # Check for license plate region information
+        for plate_info in features.get("extracted_text", {}).get("license_plate_info", []):
+            if plate_info.get("region_name"):
+                return plate_info["region_name"]
+
+        # Check for city names in business names
+        for business in features.get("extracted_text", {}).get("business_names", []):
+            # Look for city names after commas
+            city_match = re.search(r",\s*([A-Z][a-zA-Z\s]+)(?:,|\.|$)", business)
+            if city_match:
+                return city_match.group(1).strip()
+
+        # Check for city names in description
+        city_patterns = [
+            r"in ([A-Z][a-zA-Z\s]+)(?:,|\.|$)",
+            r"at ([A-Z][a-zA-Z\s]+)(?:,|\.|$)",
+            r"near ([A-Z][a-zA-Z\s]+)(?:,|\.|$)",
+            r"(?:city|town|village|district) of ([A-Z][a-zA-Z\s]+)(?:,|\.|$)",
+        ]
+
+        for pattern in city_patterns:
+            match = re.search(pattern, description)
+            if match:
+                return match.group(1).strip()
+
+        return None
 
 
 async def process_images_in_directory(directory: str = "/app/images"):

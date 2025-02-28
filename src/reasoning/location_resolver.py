@@ -111,9 +111,17 @@ class LocationResolver:
         return refined if refined["confidence"] > location["confidence"] else None
 
     def _build_reasoning_prompt(self, features: Dict, candidates: List[Dict], description: str, location_hint: str = None) -> str:
-        """Build prompt for the LLM"""
+        """Build prompt for the LLM with improved entity information"""
         candidates_text = self._format_candidates(candidates)
         location_context = f"\nProvided Location Context: {location_hint}" if location_hint else ""
+
+        # Extract entity-location associations
+        entity_locations = features.get("entity_locations", {})
+        entity_location_text = ""
+        if entity_locations:
+            entity_location_text = "\nEntity-Location Associations:\n"
+            for entity, location in entity_locations.items():
+                entity_location_text += f"- {entity} → {location}\n"
 
         # Extract environmental features
         env_features = {
@@ -125,8 +133,18 @@ class LocationResolver:
             "vegetation": features.get("vegetation_density", "unknown"),
         }
 
+        # Format business information with more detail
+        business_details = []
+        for business in features.get("extracted_text", {}).get("business_names", []):
+            business_type = features.get("entity_types", {}).get(business, "unknown")
+            business_details.append(f"{business} (Type: {business_type})")
+
+        # Format street information
+        street_details = []
+        for street in features.get("extracted_text", {}).get("street_signs", []):
+            street_details.append(street)
+
         # Extract license plate information with region details
-        license_plates = features.get("extracted_text", {}).get("license_plates", [])
         license_plate_info = features.get("extracted_text", {}).get("license_plate_info", [])
 
         # Format license plate information
@@ -134,8 +152,8 @@ class LocationResolver:
         for plate_info in license_plate_info:
             plate_details.append(
                 f"Plate: {plate_info['plate_number']} "
-                f"(Country: {plate_info['country']}, "
-                f"Region: {plate_info['region_name']} [{plate_info['region_code']}])"
+                f"(Country: {plate_info.get('country', 'Unknown')}, "
+                f"Region: {plate_info.get('region_name', 'Unknown')} [{plate_info.get('region_code', 'Unknown')}])"
             )
 
         return f"""
@@ -155,28 +173,36 @@ class LocationResolver:
         License Plate Analysis:
         {chr(10).join(plate_details) if plate_details else 'No license plates detected'}
         
+        Business Information:
+        {chr(10).join([f"- {business}" for business in business_details]) if business_details else 'No businesses detected'}
+        
+        Street Information:
+        {chr(10).join([f"- {street}" for street in street_details]) if street_details else 'No streets detected'}
+        
+        Building Information:
+        {chr(10).join([f"- {building}" for building in features.get('extracted_text', {}).get('building_info', [])]) if features.get('extracted_text', {}).get('building_info', []) else 'No building info detected'}
+        {entity_location_text}
+        
         Other Features:
-        - Landmarks: {', '.join(features['landmarks']) if features['landmarks'] else 'None detected'}
-        - Architecture: {features['architecture_style'] or 'Unknown'}
-        - Time of Day: {features['time_of_day'] or 'Unknown'}
-        - Weather: {features['weather'] or 'Unknown'}
-        - Business Names: {', '.join(features.get('extracted_text', {}).get('business_names', []))}
-        - Street Signs: {', '.join(features.get('extracted_text', {}).get('street_signs', []))}
-        - Building Info: {', '.join(features.get('extracted_text', {}).get('building_info', []))}
+        - Landmarks: {', '.join(features['landmarks']) if features.get('landmarks') else 'None detected'}
+        - Architecture: {features.get('architecture_style') or 'Unknown'}
+        - Time of Day: {features.get('time_of_day') or 'Unknown'}
+        - Weather: {features.get('weather') or 'Unknown'}
         
         Potential Locations:
         {candidates_text}
         
         Please analyze all evidence to determine the most specific location possible, considering:
         1. License plate region codes - these provide exact city information (e.g. 16 = Bursa)
-        2. Specific districts or neighborhoods within the identified city
-        3. Street names and building numbers
-        4. Business locations and landmarks
-        5. Match between environmental features and local geography
-        6. Architectural styles and building patterns
-        7. Language and script used in signs
-        8. Road types and infrastructure style
-        9. Vegetation patterns and climate indicators
+        2. Business names and their known locations
+        3. Street names and their city context
+        4. Specific districts or neighborhoods within the identified city
+        5. Building numbers and addresses
+        6. Match between environmental features and local geography
+        7. Architectural styles and building patterns
+        8. Language and script used in signs
+        9. Road types and infrastructure style
+        10. Vegetation patterns and climate indicators
         
         If a location context was provided, prioritize matches within that area.
         License plate region codes should be your primary indicator for city-level location.

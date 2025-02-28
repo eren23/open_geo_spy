@@ -7,6 +7,7 @@ import base64
 import requests
 import io
 from math import ceil
+import re
 
 
 class ImageAnalyzer:
@@ -250,7 +251,7 @@ class ImageAnalyzer:
         return completion.choices[0].message.content
 
     def _parse_text_analysis(self, text_analysis: str) -> Dict[str, List[str]]:
-        """Parse the text extraction response into structured data"""
+        """Parse the text extraction response into structured data with improved entity categorization"""
         features = {
             "street_signs": [],
             "building_info": [],
@@ -259,6 +260,7 @@ class ImageAnalyzer:
             "other_text": [],
             "license_plates": [],  # List of raw plate numbers
             "license_plate_info": [],  # List of dicts with detailed plate info
+            "entity_types": {},  # Store entity type classifications
         }
 
         current_category = None
@@ -267,24 +269,109 @@ class ImageAnalyzer:
             if not line:
                 continue
 
-            if line.endswith(":"):
-                category = line[:-1].lower()
-                if category in features:
-                    current_category = category
+            # Check for category headers
+            if line.endswith(":") and line.isupper():
+                current_category = line[:-1].lower()
                 continue
 
-            if current_category and line.startswith("-"):
-                text = line[1:].strip()
-                # Check for license plate patterns
-                is_plate, plate_info = self._is_license_plate(text)
-                if is_plate:
-                    features["license_plates"].append(text)
-                    if plate_info:
-                        features["license_plate_info"].append({"plate_number": text, **plate_info})
-                else:
-                    features[current_category].append(text)
+            # Process text within a category
+            if current_category and ":" in line:
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    text = parts[1].strip()
+                    if text:
+                        # Detect entity type with more nuanced rules
+                        entity_type = self._classify_entity_type(text)
+                        features["entity_types"][text] = entity_type
+
+                        # Categorize based on entity type
+                        if entity_type == "business":
+                            features["business_names"].append(text)
+                        elif entity_type == "street":
+                            features["street_signs"].append(text)
+                        elif entity_type == "building":
+                            features["building_info"].append(text)
+                        elif entity_type == "license_plate":
+                            is_plate, plate_info = self._is_license_plate(text)
+                            features["license_plates"].append(text)
+                            if plate_info:
+                                features["license_plate_info"].append({"plate_number": text, **plate_info})
+                        else:
+                            features[current_category].append(text)
 
         return features
+
+    def _classify_entity_type(self, text: str) -> str:
+        """Classify text into entity types using pattern matching and contextual clues"""
+        text_lower = text.lower()
+
+        # Business indicators
+        business_indicators = [
+            "gmbh",
+            "ltd",
+            "inc",
+            "llc",
+            "co.",
+            "kg",
+            "ag",
+            "restaurant",
+            "café",
+            "cafe",
+            "hotel",
+            "shop",
+            "store",
+            "markt",
+            "market",
+            "supermarket",
+            "biomarkt",
+            "bakery",
+            "bäckerei",
+            "apotheke",
+            "pharmacy",
+            "bank",
+        ]
+
+        # Street indicators
+        street_indicators = [
+            "straße",
+            "strasse",
+            "str.",
+            "street",
+            "avenue",
+            "ave",
+            "road",
+            "rd",
+            "boulevard",
+            "blvd",
+            "lane",
+            "ln",
+            "way",
+            "allee",
+            "platz",
+            "square",
+        ]
+
+        # Building indicators
+        building_indicators = ["building", "gebäude", "haus", "house", "apartment", "apt", "suite", "floor", "etage", "no.", "nr.", "number", "hausnummer"]
+
+        # Check for business patterns
+        if any(indicator in text_lower for indicator in business_indicators):
+            return "business"
+
+        # Check for street patterns
+        if any(indicator in text_lower for indicator in street_indicators):
+            return "street"
+
+        # Check for building patterns
+        if any(indicator in text_lower for indicator in building_indicators) or re.search(r"\d+\s*[a-zA-Z]?$", text):
+            return "building"
+
+        # Check for license plate patterns (simplified check)
+        if re.search(r"^[A-Z]{1,3}[-\s]?[0-9]{1,4}[-\s]?[A-Z]{0,3}$", text):
+            return "license_plate"
+
+        # Default to other
+        return "other"
 
     def _is_license_plate(self, text: str) -> Tuple[bool, Optional[Dict[str, str]]]:
         """Detect if text matches common license plate patterns and extract region info"""
