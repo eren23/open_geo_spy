@@ -6,6 +6,7 @@ from .enhanced_search import EnhancedLocationSearch
 import re
 import googlemaps
 from src.config import CONFIG
+from math import radians, cos
 
 
 class GeoDataInterface:
@@ -154,7 +155,18 @@ class GeoDataInterface:
             coords_match = re.search(r"(\d+\.?\d*),\s*(\d+\.?\d*)", location_hint)
             if coords_match:
                 lat, lon = map(float, coords_match.groups())
-                initial_coords = {"lat": lat, "lon": lon, "confidence": 0.9 if "confidence" in location_hint.lower() else 0.7}
+                # Add a default bounding box of roughly 5km around the point
+                initial_coords = {
+                    "lat": lat,
+                    "lon": lon,
+                    "confidence": 0.9 if "confidence" in location_hint.lower() else 0.7,
+                    "bbox": {
+                        "north": lat + 0.045,  # Approximately 5km
+                        "south": lat - 0.045,
+                        "east": lon + 0.045 / cos(radians(lat)),
+                        "west": lon - 0.045 / cos(radians(lat)),
+                    },
+                }
             else:
                 # Try to geocode the location name
                 try:
@@ -163,11 +175,18 @@ class GeoDataInterface:
                         geocode_result = self.gmaps.geocode(location_hint)
                         if geocode_result:
                             location = geocode_result[0]
-                            coords = {"lat": location["geometry"]["location"]["lat"], "lon": location["geometry"]["location"]["lng"]}
+                            lat = location["geometry"]["location"]["lat"]
+                            lon = location["geometry"]["location"]["lng"]
                             initial_coords = {
-                                "lat": coords["lat"],
-                                "lon": coords["lon"],
+                                "lat": lat,
+                                "lon": lon,
                                 "confidence": 0.8 if location_hint.lower() in ["germany", "deutschland"] else 0.6,
+                                "bbox": {
+                                    "north": lat + 0.045,
+                                    "south": lat - 0.045,
+                                    "east": lon + 0.045 / cos(radians(lat)),
+                                    "west": lon - 0.045 / cos(radians(lat)),
+                                },
                             }
                 except Exception as e:
                     print(f"Error geocoding location hint: {e}")
