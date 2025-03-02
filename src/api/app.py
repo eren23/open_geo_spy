@@ -295,7 +295,9 @@ async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Op
 
         # Use existing pipeline to find location
         candidates = await geo_interface.search_location_candidates(features, location)
-        final_location = location_resolver.resolve_location(features, candidates, analysis_text, location)
+        final_location = location_resolver.resolve_location(
+            features=features, candidates=candidates, description=analysis_text, metadata={"location_hint": location} if location else None
+        )
 
         # Save files if requested
         saved_files = []

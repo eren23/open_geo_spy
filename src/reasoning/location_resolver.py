@@ -11,19 +11,38 @@ class LocationResolver:
 
     def resolve_location(self, features: Dict, candidates: List[Dict], description: str, metadata: Dict = None, osv5m_prediction: Dict = None) -> Dict:
         """Enhanced location resolution considering multiple models"""
-        # Get initial resolution
-        initial_location = self._initial_resolution(features, candidates, description)
+        # Extract location hint from metadata or features
+        location_hint = metadata.get("location_hint") if metadata else None
+        if not location_hint and features.get("location_hint"):
+            location_hint = features["location_hint"]
+
+        # Get initial resolution with location hint
+        initial_location = self._initial_resolution(features, candidates, description, location_hint)
 
         # If OSV5M prediction is highly confident, bias towards it
         if osv5m_prediction and osv5m_prediction.get("confidence", 0) > 0.8:
-            # Merge OSV5M prediction with initial resolution
-            initial_location = self._merge_predictions(initial_location, osv5m_prediction)
+            # Only merge if OSV5M prediction is within the hinted region
+            if location_hint and self._is_within_region(osv5m_prediction, location_hint):
+                initial_location = self._merge_predictions(initial_location, osv5m_prediction)
+            elif not location_hint:
+                initial_location = self._merge_predictions(initial_location, osv5m_prediction)
 
         # Continue with existing refinement steps
         if initial_location and initial_location["confidence"] > 0.7:
             refined_location = self._refine_with_business_verification(initial_location, features)
             if refined_location:
-                initial_location = refined_location
+                # Only use refined location if it's within the hinted region
+                if location_hint and self._is_within_region(refined_location, location_hint):
+                    initial_location = refined_location
+                elif not location_hint:
+                    initial_location = refined_location
+
+        # Final check to ensure we're within the hinted region
+        if location_hint and not self._is_within_region(initial_location, location_hint):
+            # If we're not in the hinted region, try to find the closest candidate that is
+            closest_valid = self._find_closest_valid_candidate(candidates, location_hint)
+            if closest_valid:
+                initial_location = closest_valid
 
         return initial_location
 
@@ -292,3 +311,46 @@ class LocationResolver:
             "source": "hybrid",
             "type": "merged_prediction",
         }
+
+    def _is_within_region(self, location: Dict, region_hint: str) -> bool:
+        """Check if a location is within the hinted region"""
+        try:
+            # Use Google Maps geocoding to get region bounds
+            completion = self.client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"""
+                    Given these two locations, determine if the first is within the second:
+                    Location 1: {location['name']} ({location['lat']}, {location['lon']})
+                    Location 2: {region_hint}
+                    
+                    Consider:
+                    1. If region_hint is a city, check if location is in that city or its districts
+                    2. If region_hint is a state/province, check if location is in that state
+                    3. If region_hint is a country, check if location is in that country
+                    
+                    Return ONLY 'true' or 'false'
+                    """,
+                    }
+                ],
+            )
+            result = completion.choices[0].message.content.strip().lower()
+            return result == "true"
+        except Exception as e:
+            print(f"Error checking region containment: {e}")
+            return True  # Default to True to avoid false negatives
+
+    def _find_closest_valid_candidate(self, candidates: List[Dict], region_hint: str) -> Optional[Dict]:
+        """Find the closest candidate that is within the hinted region"""
+        valid_candidates = []
+        for candidate in candidates:
+            if self._is_within_region(candidate, region_hint):
+                valid_candidates.append(candidate)
+
+        if not valid_candidates:
+            return None
+
+        # Return the highest confidence candidate among valid ones
+        return max(valid_candidates, key=lambda x: x.get("confidence", 0))

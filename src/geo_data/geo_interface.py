@@ -148,8 +148,9 @@ class GeoDataInterface:
         print(f"Street Signs: {processed_features['street_signs']}")
         print("========================\n")
 
-        # Convert location hint to coordinates if provided
+        # Convert location hint to coordinates and region info
         initial_coords = None
+        region_info = None
         if location_hint:
             # Try to extract coordinates from the hint
             coords_match = re.search(r"(\d+\.?\d*),\s*(\d+\.?\d*)", location_hint)
@@ -170,26 +171,50 @@ class GeoDataInterface:
             else:
                 # Try to geocode the location name
                 try:
-                    # Use Google Maps geocoding correctly
+                    # Use Google Maps geocoding
                     if self.gmaps:
                         geocode_result = self.gmaps.geocode(location_hint)
                         if geocode_result:
                             location = geocode_result[0]
                             lat = location["geometry"]["location"]["lat"]
                             lon = location["geometry"]["location"]["lng"]
+                            bounds = location["geometry"].get("bounds") or location["geometry"].get("viewport")
+
                             initial_coords = {
                                 "lat": lat,
                                 "lon": lon,
-                                "confidence": 0.8 if location_hint.lower() in ["germany", "deutschland"] else 0.6,
-                                "bbox": {
-                                    "north": lat + 0.045,
-                                    "south": lat - 0.045,
-                                    "east": lon + 0.045 / cos(radians(lat)),
-                                    "west": lon - 0.045 / cos(radians(lat)),
-                                },
+                                "confidence": 0.9,  # Higher confidence for geocoded results
+                                "bbox": (
+                                    {
+                                        "north": bounds["northeast"]["lat"],
+                                        "south": bounds["southwest"]["lat"],
+                                        "east": bounds["northeast"]["lng"],
+                                        "west": bounds["southwest"]["lng"],
+                                    }
+                                    if bounds
+                                    else {
+                                        "north": lat + 0.045,
+                                        "south": lat - 0.045,
+                                        "east": lon + 0.045 / cos(radians(lat)),
+                                        "west": lon - 0.045 / cos(radians(lat)),
+                                    }
+                                ),
+                            }
+
+                            # Store region info for filtering
+                            region_info = {
+                                "city": next((comp["long_name"] for comp in location["address_components"] if "locality" in comp["types"]), None),
+                                "state": next(
+                                    (comp["long_name"] for comp in location["address_components"] if "administrative_area_level_1" in comp["types"]), None
+                                ),
+                                "country": next((comp["long_name"] for comp in location["address_components"] if "country" in comp["types"]), None),
                             }
                 except Exception as e:
                     print(f"Error geocoding location hint: {e}")
+
+        # Add location hint to features for better context
+        if region_info:
+            processed_features["location_hint"] = region_info
 
         # Get candidates from enhanced search
         enhanced_candidates = await self.enhanced_search.find_location_candidates(processed_features, metadata=metadata, location_hint=location_hint)
@@ -223,13 +248,27 @@ class GeoDataInterface:
             + cultural_candidates  # Cultural landmarks
         )
 
+        # Filter and boost confidence for candidates within the hinted region
+        if region_info:
+            for candidate in all_candidates:
+                # Check if candidate is within the hinted region
+                is_in_region = self._is_in_region(candidate, region_info, initial_coords)
+                if is_in_region:
+                    # Boost confidence for matches within the region
+                    candidate["confidence"] = min(1.0, candidate["confidence"] + 0.2)
+                else:
+                    # Reduce confidence for matches outside the region
+                    candidate["confidence"] *= 0.5
+
         # Deduplicate and rank candidates
         ranked_candidates = self._rank_candidates(all_candidates, processed_features, initial_coords)
 
-        # If OSM returns no results, try Google Maps
-        if not ranked_candidates and self.gmaps:
+        # If no results within region, try Google Maps
+        if not ranked_candidates and self.gmaps and region_info:
             google_candidates = self._search_google_maps(processed_features, initial_coords)
-            ranked_candidates.extend(google_candidates)
+            for candidate in google_candidates:
+                if self._is_in_region(candidate, region_info, initial_coords):
+                    ranked_candidates.append(candidate)
 
         # Print summary for debugging
         print("\n=== Location Candidates ===")
@@ -242,6 +281,41 @@ class GeoDataInterface:
         print("=======================\n")
 
         return ranked_candidates[:10]  # Return top 10 candidates
+
+    def _is_in_region(self, candidate: Dict, region_info: Dict, initial_coords: Optional[Dict]) -> bool:
+        """Check if a candidate is within the hinted region"""
+        # If we have coordinates and bounding box, check that first
+        if initial_coords and initial_coords.get("bbox"):
+            bbox = initial_coords["bbox"]
+            if bbox["south"] <= candidate["lat"] <= bbox["north"] and bbox["west"] <= candidate["lon"] <= bbox["east"]:
+                return True
+
+        # If we have region info, check against that
+        if region_info:
+            # Try to geocode the candidate's location
+            if self.gmaps:
+                try:
+                    reverse_result = self.gmaps.reverse_geocode((candidate["lat"], candidate["lon"]))
+                    if reverse_result:
+                        location = reverse_result[0]
+                        for component in location["address_components"]:
+                            # Check city match
+                            if region_info["city"] and "locality" in component["types"]:
+                                if component["long_name"] == region_info["city"]:
+                                    return True
+                            # Check state match
+                            if region_info["state"] and "administrative_area_level_1" in component["types"]:
+                                if component["long_name"] == region_info["state"]:
+                                    return True
+                            # Check country match
+                            if region_info["country"] and "country" in component["types"]:
+                                if component["long_name"] == region_info["country"]:
+                                    return True
+                except Exception as e:
+                    print(f"Error in reverse geocoding: {e}")
+                    return True  # Default to True to avoid false negatives
+
+        return False
 
     def _get_location_coordinates(self, location: str) -> Optional[Dict]:
         """Get coordinates for a location string using GeoNames"""

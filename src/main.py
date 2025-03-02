@@ -20,13 +20,16 @@ class GeoLocator:
         self.location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
         self.osv5m_predictor = OSV5MPredictor()
 
-    async def process_image(self, image_path: str):
+    async def process_image(self, image_path: str, location_hint: str = None):
         """Full processing pipeline with enhanced entity extraction"""
         print("\n=== Starting Image Processing ===")
         print(f"Image: {image_path}")
+        if location_hint:
+            print(f"Location Hint: {location_hint}")
 
         # Extract metadata
         metadata = self.metadata_extractor.extract_metadata(image_path)
+        metadata["location_hint"] = location_hint  # Add location hint to metadata
         initial_location = self._get_initial_location(metadata)
         if initial_location:
             print("\nInitial Location from Metadata:")
@@ -59,14 +62,22 @@ class GeoLocator:
         features, description = self.image_analyzer.analyze_image(image_path)
         print("✓ VLM Analysis complete")
 
+        # Add location hint to features
+        if location_hint:
+            features["location_hint"] = location_hint
+
         # Extract location context from features
         location_context = self._extract_location_context(features, description)
+        if location_hint and not location_context:
+            location_context = location_hint
+        elif location_hint:
+            # Combine location hint with context if they're different
+            if location_hint.lower() not in location_context.lower():
+                location_context = f"{location_context} ({location_hint})"
+
         if location_context:
             print(f"✓ Extracted location context: {location_context}")
-
-            # Add location context to initial_location if available
-            if initial_location:
-                initial_location["context"] = location_context
+            features["location_context"] = location_context
 
         # Get location candidates
         print("\n=== Getting Location Candidates ===")

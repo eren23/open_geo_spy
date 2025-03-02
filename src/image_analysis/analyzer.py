@@ -843,3 +843,171 @@ class ImageAnalyzer:
             return "medium"
         else:
             return "low"
+
+    def analyze_video(self, video_path: str) -> Tuple[Dict, str]:
+        """Analyze video for text and location features"""
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError("Could not open video file")
+
+            # Get video metadata
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps
+
+            # Initialize scene detection
+            scene_detector = cv2.createBackgroundSubtractorMOG2()
+            last_scene_time = 0
+            scene_threshold = 0.3  # Minimum scene change threshold
+            min_scene_duration = 2.0  # Minimum seconds between scenes
+
+            text_findings = []
+            scene_descriptions = []
+            current_frame = 0
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                current_time = current_frame / fps
+
+                # Apply scene detection
+                fgmask = scene_detector.apply(frame)
+                scene_score = np.mean(fgmask) / 255.0
+
+                # Check if this is a new scene
+                if scene_score > scene_threshold and current_time - last_scene_time > min_scene_duration:
+
+                    # Convert frame for analysis
+                    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+                    # Get scene description
+                    scene_desc = self._analyze_scene(pil_image, current_time)
+                    scene_descriptions.append({"timestamp": current_time, "description": scene_desc})
+
+                    # Extract text from scene
+                    text_result = self._extract_text_from_frame(frame, current_time)
+                    if text_result:
+                        text_findings.append(text_result)
+
+                    last_scene_time = current_time
+
+                current_frame += int(fps)  # Skip frames for efficiency
+                cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+
+            cap.release()
+
+            # Combine results
+            combined_text = self._combine_video_findings(text_findings)
+            scene_summary = self._summarize_scenes(scene_descriptions)
+
+            return {
+                "text_findings": combined_text,
+                "scene_analysis": scene_summary,
+                "duration": duration,
+                "frame_count": frame_count,
+                "fps": fps,
+            }, scene_summary
+
+        except Exception as e:
+            print(f"Error analyzing video: {e}")
+            return {}, ""
+
+    def _analyze_scene(self, image: Image, timestamp: float) -> str:
+        """Analyze a video scene using Gemini"""
+        try:
+            # Convert image for API
+            buffered = io.BytesIO()
+            image.save(buffered, format="JPEG")
+            image_base64 = base64.b64encode(buffered.getvalue()).decode()
+            image_url = f"data:image/jpeg;base64,{image_base64}"
+
+            prompt = f"""
+            Analyze this video frame at timestamp {timestamp:.2f} seconds.
+            Describe:
+            1. The main scene content and setting
+            2. Any significant objects or actions
+            3. Environmental conditions
+            4. Any text or signs visible
+            5. Notable location indicators
+            
+            Be concise but specific.
+            """
+
+            completion = self.client.chat.completions.create(
+                model="google/gemini-2.0-flash-001",
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": image_url}}]}],
+                extra_headers=self.headers,
+            )
+
+            return completion.choices[0].message.content
+
+        except Exception as e:
+            print(f"Error analyzing scene: {e}")
+            return ""
+
+    def _extract_text_from_frame(self, frame: np.ndarray, timestamp: float) -> Dict:
+        """Extract text from a video frame with improved chunking"""
+        height, width = frame.shape[:2]
+
+        # Create overlapping chunks with dynamic sizing
+        chunk_size = min(width, height) // 2
+        overlap = chunk_size // 3
+        chunks = []
+
+        for y in range(0, height - overlap, chunk_size - overlap):
+            for x in range(0, width - overlap, chunk_size - overlap):
+                x2 = min(x + chunk_size, width)
+                y2 = min(y + chunk_size, height)
+                chunk = frame[y:y2, x:x2]
+                chunks.append((chunk, (x, y, x2, y2)))
+
+        # Process chunks in parallel
+        chunk_results = []
+        for chunk, coords in chunks:
+            result = self._extract_text_from_chunk(chunk, Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)), coords)
+            if result:
+                chunk_results.append(result)
+
+        return {"timestamp": timestamp, "text": self._combine_chunk_results(chunk_results)}
+
+    def _combine_video_findings(self, findings: List[Dict]) -> Dict:
+        """Combine and track text findings across video frames"""
+        text_tracks = {"STREET_SIGNS": {}, "BUILDING_INFO": {}, "BUSINESS_NAMES": {}, "INFORMATIONAL": {}, "OTHER_TEXT": {}}
+
+        # Track text occurrences over time
+        for finding in findings:
+            timestamp = finding["timestamp"]
+            text_data = self._parse_text_analysis(finding["text"])
+
+            for category in text_tracks:
+                if category.lower() in text_data:
+                    for text in text_data[category.lower()]:
+                        if text not in text_tracks[category]:
+                            text_tracks[category][text] = []
+                        text_tracks[category][text].append(timestamp)
+
+        # Filter and combine results
+        combined = {}
+        for category, tracks in text_tracks.items():
+            filtered_tracks = {}
+            for text, timestamps in tracks.items():
+                # Only keep text that appears in multiple frames or with high confidence
+                if len(timestamps) > 1:
+                    filtered_tracks[text] = {"timestamps": timestamps, "duration": timestamps[-1] - timestamps[0], "occurrences": len(timestamps)}
+            if filtered_tracks:
+                combined[category] = filtered_tracks
+
+        return combined
+
+    def _summarize_scenes(self, scenes: List[Dict]) -> str:
+        """Generate a temporal summary of video scenes"""
+        summary = "Video Scene Analysis:\n\n"
+
+        for i, scene in enumerate(scenes, 1):
+            summary += f"Scene {i} (at {scene['timestamp']:.2f}s):\n"
+            summary += f"{scene['description']}\n\n"
+
+        return summary
