@@ -116,67 +116,96 @@ async def _enhance_entity_extraction(image_path: str, features: Dict, descriptio
 
         # Create prompt for entity extraction
         prompt = f"""
-        Analyze this image and extract the following entities with high precision:
-        
-        1. BUSINESSES: Extract all business names visible in the image
-        2. STREETS: Extract all street names visible in the image
-        3. BUILDINGS: Extract all building numbers and identifiers
-        4. LANDMARKS: Extract all landmarks visible or referenced
-        5. LOCATION_CONTEXT: Extract any city, district, or region names mentioned
-        
-        For each entity, provide:
-        - The exact text as it appears
-        - The entity type (business, street, building, landmark, location)
-        - Any additional context (e.g., "This business appears to be in Berlin")
-        - Your confidence level (0-1)
-        
+        Analyze this image and extract the following entities with high precision.
+        Format your response using EXACTLY these categories, one per line:
+
+        BUSINESSES:
+        - List each business name exactly as it appears
+        - Include confidence score in [brackets] from 0-1
+
+        STREETS:
+        - List each street name exactly as it appears
+        - Include confidence score in [brackets] from 0-1
+
+        BUILDINGS:
+        - List each building number and identifier
+        - Include confidence score in [brackets] from 0-1
+
+        LANDMARKS:
+        - List each landmark visible or referenced
+        - Include confidence score in [brackets] from 0-1
+
+        LOCATION_CONTEXT:
+        - List any city, district, or region names mentioned
+        - Include confidence score in [brackets] from 0-1
+
         Previous analysis found:
         {json.dumps(features, indent=2)}
-        
+
         Description: {description}
-        
-        Format your response as JSON with these categories.
+
+        Remember to format each line as:
+        - Exact text [confidence_score]
         """
 
-        # Generate response from Gemini
-        response = gemini_model.generate_content([{"text": prompt}, {"image": {"data": image_b64}}])
+        # Generate response from Gemini using the new format
+        response = gemini_model.generate_content(contents=[{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}]}])
 
-        # Parse the response
-        try:
-            # Try to extract JSON from the response
-            json_match = re.search(r"```json\n(.*?)\n```", response.text, re.DOTALL)
-            if json_match:
-                enhanced_data = json.loads(json_match.group(1))
-            else:
-                # Try to parse the whole response as JSON
-                enhanced_data = json.loads(response.text)
-        except json.JSONDecodeError:
-            # If JSON parsing fails, extract entities using regex
-            enhanced_data = {"BUSINESSES": [], "STREETS": [], "BUILDINGS": [], "LANDMARKS": [], "LOCATION_CONTEXT": []}
+        # Parse the response into our feature format
+        if not response.text:
+            return {}
 
-            for category in enhanced_data.keys():
-                pattern = rf"{category}:(.*?)(?=\n[A-Z_]+:|$)"
-                match = re.search(pattern, response.text, re.DOTALL)
-                if match:
-                    items = [item.strip("- ") for item in match.group(1).strip().split("\n") if item.strip()]
-                    enhanced_data[category] = items
-
-        # Convert to our feature format
         result = {
             "extracted_text": {
-                "business_names": enhanced_data.get("BUSINESSES", []),
-                "street_signs": enhanced_data.get("STREETS", []),
-                "building_info": enhanced_data.get("BUILDINGS", []),
+                "business_names": [],
+                "street_signs": [],
+                "building_info": [],
             },
-            "landmarks": enhanced_data.get("LANDMARKS", []),
+            "landmarks": [],
             "entity_locations": {},
         }
 
-        # Extract location contexts
-        for location in enhanced_data.get("LOCATION_CONTEXT", []):
-            for entity_type in ["BUSINESSES", "STREETS", "LANDMARKS"]:
-                for entity in enhanced_data.get(entity_type, []):
-                    result["entity_locations"][entity] = location
+        current_category = None
+        for line in response.text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+
+            # Check for category headers
+            if line.endswith(":"):
+                category = line[:-1].upper()
+                if category in ["BUSINESSES", "STREETS", "BUILDINGS", "LANDMARKS", "LOCATION_CONTEXT"]:
+                    current_category = category
+                continue
+
+            # Process items under each category
+            if current_category and line.startswith("-"):
+                # Extract text and confidence score
+                text = line.strip("- ")
+                confidence_match = re.search(r"\[(0?\.\d+)\]", text)
+                if confidence_match:
+                    confidence = float(confidence_match.group(1))
+                    text = text[: text.find("[")].strip()
+                else:
+                    confidence = 0.5  # Default confidence if not specified
+
+                if confidence < 0.3:  # Skip low confidence items
+                    continue
+
+                # Add to appropriate category
+                if current_category == "BUSINESSES":
+                    result["extracted_text"]["business_names"].append(text)
+                elif current_category == "STREETS":
+                    result["extracted_text"]["street_signs"].append(text)
+                elif current_category == "BUILDINGS":
+                    result["extracted_text"]["building_info"].append(text)
+                elif current_category == "LANDMARKS":
+                    result["landmarks"].append(text)
+                elif current_category == "LOCATION_CONTEXT":
+                    # Add location context to all entities
+                    for category in ["business_names", "street_signs", "building_info"]:
+                        for entity in result["extracted_text"][category]:
+                            result["entity_locations"][entity] = text
 
         return result
 
@@ -194,23 +223,22 @@ async def health_check():
 @app.post("/api/analyze-multimodal")
 async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Optional[bool] = Form(False), location: Optional[str] = Form(None)) -> dict:
     """
-    Analyze multiple media files (images/videos) to extract location information
-    Optional location parameter can be used to narrow down the search area
+    Analyze multiple media files (images/videos) for location information
     """
+    temp_files = []
     try:
-        # Create temporary files for the uploads
-        temp_files = []
+        # Save uploaded files to temp directory
         for file in files:
-            # Verify file type
-            if not file.content_type or not file.content_type.startswith(("image/", "video/")):
-                raise HTTPException(status_code=400, detail=f"Invalid file type: {file.content_type}. Only images and videos are supported.")
+            if not file.content_type.startswith(("image/", "video/")):
+                raise HTTPException(status_code=400, detail=f"Invalid file type: {file.content_type}")
 
-            # Save to temp file
-            suffix = "." + (file.filename or "").split(".")[-1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                contents = await file.read()
-                tmp.write(contents)
-                temp_files.append((tmp.name, file.content_type))
+            # Create temp file
+            temp_fd, temp_path = tempfile.mkstemp()
+            temp_files.append((temp_path, file.content_type))
+
+            # Save file content
+            with os.fdopen(temp_fd, "wb") as tmp:
+                shutil.copyfileobj(file.file, tmp)
 
         # Build location analysis prompt
         prompt = """
@@ -238,22 +266,20 @@ async def analyze_multimodal(files: List[UploadFile] = File(...), save_files: Op
         """
 
         # Process with Gemini
-        contents = [prompt]  # Start with the prompt text
+        contents = []
+        contents.append({"text": prompt})
 
         # Add media files
         for temp_file, content_type in temp_files:
             with open(temp_file, "rb") as f:
                 file_data = f.read()
+                file_b64 = base64.b64encode(file_data).decode("utf-8")
 
-            if content_type.startswith("video/"):
-                mime_type = content_type
-            else:
-                mime_type = "image/jpeg"  # Default for images
-
-            contents.append({"inline_data": {"mime_type": mime_type, "data": base64.b64encode(file_data).decode("utf-8")}})
+                mime_type = content_type if content_type.startswith("video/") else "image/jpeg"
+                contents.append({"inline_data": {"mime_type": mime_type, "data": file_b64}})
 
         # Generate response from Gemini
-        response = gemini_model.generate_content(contents)
+        response = gemini_model.generate_content({"parts": contents})
 
         # Convert Gemini analysis to features format
         features = {

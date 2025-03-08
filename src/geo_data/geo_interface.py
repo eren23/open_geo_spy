@@ -254,11 +254,11 @@ class GeoDataInterface:
                 # Check if candidate is within the hinted region
                 is_in_region = self._is_in_region(candidate, region_info, initial_coords)
                 if is_in_region:
-                    # Boost confidence for matches within the region
-                    candidate["confidence"] = min(1.0, candidate["confidence"] + 0.2)
+                    # Smaller boost for matches within the region
+                    candidate["confidence"] = min(1.0, candidate["confidence"] + 0.1)
                 else:
-                    # Reduce confidence for matches outside the region
-                    candidate["confidence"] *= 0.5
+                    # Stronger penalty for matches outside the region
+                    candidate["confidence"] *= 0.3
 
         # Deduplicate and rank candidates
         ranked_candidates = self._rank_candidates(all_candidates, processed_features, initial_coords)
