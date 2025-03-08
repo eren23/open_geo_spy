@@ -15,3 +15,11 @@ My goals:
 - Experiment with different llms
 - Use more location examples
 - and more...
+
+## Run
+
+put requirements into .env file
+
+```bash
+docker compose up --build
+```
