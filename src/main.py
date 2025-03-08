@@ -68,12 +68,13 @@ class GeoLocator:
 
         # Extract location context from features
         location_context = self._extract_location_context(features, description)
-        if location_hint and not location_context:
-            location_context = location_hint
-        elif location_hint:
-            # Combine location hint with context if they're different
-            if location_hint.lower() not in location_context.lower():
-                location_context = f"{location_context} ({location_hint})"
+        if location_hint:
+            # Only use location hint if we have no context or if it's more specific
+            if not location_context:
+                location_context = location_hint
+            elif location_hint.lower() not in location_context.lower() and location_context.lower() not in location_hint.lower():
+                # Only combine if they're truly different and neither contains the other
+                location_context = f"{location_context} (near {location_hint})"
 
         if location_context:
             print(f"✓ Extracted location context: {location_context}")

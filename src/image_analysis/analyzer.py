@@ -8,6 +8,7 @@ import requests
 import io
 from math import ceil
 import re
+from .environment_classifier import EnvironmentClassifier, EnvironmentType, EnvironmentInfo
 
 
 class ImageAnalyzer:
@@ -16,6 +17,7 @@ class ImageAnalyzer:
         self.headers = {"HTTP-Referer": app_url, "X-Title": app_name}
         self.chunk_size = (800, 800)  # Size of each chunk
         self.overlap = 100  # Overlap between chunks in pixels
+        self.environment_classifier = EnvironmentClassifier()
 
     def analyze_image(self, image_path: str) -> Tuple[Dict, str]:
         """Analyze image with enhanced text and visual understanding"""
@@ -45,8 +47,16 @@ class ImageAnalyzer:
         # Analyze environmental features
         env_features = self._analyze_environment(cv_image)
 
-        # Second pass: Full image analysis with text context
-        location_analysis = self._analyze_location_features(image, text_features)
+        # Classify environment type
+        env_info = self.environment_classifier.classify_environment(cv_image, env_features)
+
+        # Add environment classification to features
+        env_features["environment_type"] = env_info.primary_type.name
+        env_features["secondary_environments"] = [t.name for t in env_info.secondary_types]
+        env_features["environment_confidence"] = env_info.confidence
+
+        # Second pass: Full image analysis with text context and environment type
+        location_analysis = self._analyze_location_features(image, text_features, env_info)
         features = self._parse_analysis(location_analysis, text_features)
 
         # Merge environmental features
@@ -63,26 +73,6 @@ class ImageAnalyzer:
             features["time_of_day"] = f"{hour:02d}:{minute:02d}"
         else:
             features["time_of_day"] = time_analysis["time_of_day"]
-
-        # Update prompt with time information
-        prompt = f"""
-        I'm showing you a section of a larger image (coordinates: {coords}).
-        Focus on finding and reading any text in this section.
-        Look for:
-        1. Signs and labels
-        2. Street names
-        3. Building numbers
-        4. Business names
-        5. Any other text
-
-        List all text you can read, with confidence levels (0-1).
-        Format: "Text: [text] (confidence: [0-1])"
-
-        Time Analysis:
-        - Time of Day: {features['time_of_day']}
-        - Period: {time_analysis.get('period', 'unknown')}
-        - Confidence: {time_analysis['confidence']:.2f}
-        """
 
         return features, f"{combined_text}\n\n{location_analysis}"
 
@@ -204,7 +194,7 @@ class ImageAnalyzer:
         except:
             return "", 0.0
 
-    def _analyze_location_features(self, image: Image, text_features: Dict) -> str:
+    def _analyze_location_features(self, image: Image, text_features: Dict, env_info: EnvironmentInfo) -> str:
         """Analyze location features using the full image"""
         # Convert image for API
         buffered = io.BytesIO()
@@ -212,10 +202,13 @@ class ImageAnalyzer:
         image_base64 = base64.b64encode(buffered.getvalue()).decode()
         image_url = f"data:image/jpeg;base64,{image_base64}"
 
-        # Add license plate analysis to the prompt
+        # Build environment-aware prompt
         location_prompt = f"""
         Analyze this image and extract all relevant location information.
         IMPORTANT: Focus on finding the MOST SPECIFIC location possible - prefer city/district level over country level.
+        
+        Environment Type: {env_info.primary_type.name} (confidence: {env_info.confidence:.2f})
+        Secondary Environments: {', '.join(t.name for t in env_info.secondary_types)}
         
         Previously extracted text:
         {text_features}
@@ -223,8 +216,8 @@ class ImageAnalyzer:
         License Plates Found:
         {', '.join(text_features.get('license_plates', []))}
         
-        Please identify with high precision:
-        1. Exact city/district name from license plates (e.g. if plate starts with 16, it's Bursa)
+        Please identify with high precision, considering the environment type:
+        1. {self._get_priority_instructions(env_info.primary_type)}
         2. Specific neighborhood or area within the city
         3. Landmarks and buildings (including any text/names found)
         4. Exact street names and addresses from visible signs
@@ -238,17 +231,116 @@ class ImageAnalyzer:
         For each identified feature:
         - Rate your confidence (0-1)
         - Explain your reasoning
-        - Start with the most specific location indicator (e.g. license plate city code)
+        - Start with the most specific location indicator
         - Only fall back to broader regions if specific location cannot be determined
+        
+        Consider the environment type when weighing evidence:
+        {self._get_environment_specific_guidance(env_info.primary_type)}
         """
 
         completion = self.client.chat.completions.create(
-            model="google/gemini-2.0-flash-001",  # Keep using Gemini for general analysis
+            model="google/gemini-2.0-flash-001",
             messages=[{"role": "user", "content": [{"type": "text", "text": location_prompt}, {"type": "image_url", "image_url": {"url": image_url}}]}],
             extra_headers=self.headers,
         )
 
         return completion.choices[0].message.content
+
+    def _get_priority_instructions(self, env_type: EnvironmentType) -> str:
+        """Get environment-specific priority instructions"""
+        instructions = {
+            EnvironmentType.URBAN: "Exact city/district name from license plates and business signs",
+            EnvironmentType.SUBURBAN: "Neighborhood identifiers and residential area names",
+            EnvironmentType.RURAL: "Nearby town names and geographic features",
+            EnvironmentType.INDUSTRIAL: "Industrial zone names and company identifiers",
+            EnvironmentType.AIRPORT: "Airport name and terminal identifiers",
+            EnvironmentType.COASTAL: "Beach/port names and coastal landmarks",
+            EnvironmentType.FOREST: "Forest name and nearby settlements",
+            EnvironmentType.MOUNTAIN: "Mountain range and peak names",
+            EnvironmentType.DESERT: "Desert region and nearest settlement",
+            EnvironmentType.PARK: "Park name and surrounding urban area",
+            EnvironmentType.HIGHWAY: "Highway number and nearest exits/intersections",
+            EnvironmentType.UNKNOWN: "Most prominent location indicators visible",
+        }
+        return instructions.get(env_type, instructions[EnvironmentType.UNKNOWN])
+
+    def _get_environment_specific_guidance(self, env_type: EnvironmentType) -> str:
+        """Get environment-specific guidance for location analysis"""
+        guidance = {
+            EnvironmentType.URBAN: """
+                - License plates and business signs are highly reliable indicators
+                - Street signs and addresses provide precise location data
+                - Building numbers and business names are key reference points
+                - Pay attention to transit system branding and station names
+            """,
+            EnvironmentType.SUBURBAN: """
+                - Focus on neighborhood entrance signs and community markers
+                - School zones and local business names are good indicators
+                - Street name patterns can identify specific developments
+                - Look for postal codes on visible mail boxes or signs
+            """,
+            EnvironmentType.RURAL: """
+                - Geographic features are more reliable than man-made markers
+                - Farm/ranch names can provide regional context
+                - Distance markers to nearest towns are valuable
+                - Local business types can indicate specific regions
+            """,
+            EnvironmentType.INDUSTRIAL: """
+                - Company names and industrial park signs are primary indicators
+                - Look for shipping addresses and facility numbers
+                - Industrial zone classifications can narrow down location
+                - Transport infrastructure can indicate specific industrial areas
+            """,
+            EnvironmentType.AIRPORT: """
+                - Terminal signs and gate numbers are highly specific
+                - Airline branding can indicate the hub location
+                - Airport codes on vehicles or equipment are reliable
+                - Focus less on license plates unless on service vehicles
+            """,
+            EnvironmentType.COASTAL: """
+                - Beach names and marina signage are primary indicators
+                - Port numbers and dock identifiers are specific
+                - Coastal business names often include location
+                - Look for marine navigation markers
+            """,
+            EnvironmentType.FOREST: """
+                - Forest service signs and trail markers are key
+                - Look for ranger station identifiers
+                - Trail names often include regional information
+                - Focus on natural landmarks more than human infrastructure
+            """,
+            EnvironmentType.MOUNTAIN: """
+                - Peak names and elevation markers are primary
+                - Trail signs and route markers provide context
+                - Ski resort branding can be location-specific
+                - Look for geological formation names
+            """,
+            EnvironmentType.DESERT: """
+                - Focus on distance markers to settlements
+                - Protected area names and boundaries
+                - Geographic feature names are key
+                - Look for research station or military installation markers
+            """,
+            EnvironmentType.PARK: """
+                - Park name and entrance signs are primary
+                - Look for municipal recreation department branding
+                - Trail markers and facility numbers help
+                - Nearby street names provide urban context
+            """,
+            EnvironmentType.HIGHWAY: """
+                - Mile markers and exit numbers are highly specific
+                - Highway numbers and intersection signs are key
+                - Service area names provide regional context
+                - Focus on official road signage over business signs
+            """,
+            EnvironmentType.UNKNOWN: """
+                - Consider all visible location indicators equally
+                - Look for the most specific and official markers
+                - Cross-reference multiple types of evidence
+                - Consider both natural and man-made features
+            """,
+        }
+        return guidance.get(env_type, guidance[EnvironmentType.UNKNOWN])
 
     def _parse_text_analysis(self, text_analysis: str) -> Dict[str, List[str]]:
         """Parse the text extraction response into structured data with improved entity categorization"""
