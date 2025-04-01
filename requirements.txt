@@ -21,3 +21,5 @@ geopy>=2.3.0
 reverse_geocoder>=1.5.1
 aiohttp>=3.8.0
 googlemaps==4.10.0
+browser-use>=0.1.40
+langchain-google-genai>=0.0.6

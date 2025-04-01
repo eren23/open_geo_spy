@@ -7,6 +7,7 @@ import re
 import googlemaps
 from src.config import CONFIG
 from math import radians, cos
+from .browser_search import BrowserSearchAdapter
 
 
 class GeoDataInterface:
@@ -16,6 +17,7 @@ class GeoDataInterface:
         self.enhanced_search = EnhancedLocationSearch(geonames_username)
         # Initialize Google Maps client
         self.gmaps = googlemaps.Client(key=CONFIG.GOOGLE_MAPS_API_KEY) if CONFIG.GOOGLE_MAPS_API_KEY else None
+        self.browser_search = BrowserSearchAdapter() if CONFIG.USE_BROWSER else None
 
     def _preprocess_features(self, features: Dict) -> Dict:
         """Preprocess and clean up features with improved entity recognition"""
@@ -269,6 +271,48 @@ class GeoDataInterface:
             for candidate in google_candidates:
                 if self._is_in_region(candidate, region_info, initial_coords):
                     ranked_candidates.append(candidate)
+
+        search_queries = []
+        location_contexts = []
+
+        # Get location contexts
+        if location_hint:
+            location_contexts.append(location_hint)
+        if processed_features.get("entity_locations"):
+            location_contexts.extend(processed_features["entity_locations"].values())
+
+        # Add business names with location context
+        if processed_features.get("business_names"):
+            for business in processed_features["business_names"]:
+                for context in location_contexts:
+                    search_queries.append(f"{business} {context}")
+
+        # Add street signs with location context
+        if processed_features.get("street_signs"):
+            for street in processed_features["street_signs"]:
+                for context in location_contexts:
+                    search_queries.append(f"{street} {context}")
+
+        # Add landmarks with location context
+        if processed_features.get("landmarks"):
+            for landmark in processed_features["landmarks"]:
+                for context in location_contexts:
+                    search_queries.append(f"{landmark} {context}")
+
+        if not search_queries and location_hint:
+            search_queries.append(location_hint)
+
+        # Initialize candidates list
+        candidates = []
+
+        # If browser search is enabled, add browser results
+        if CONFIG.USE_BROWSER and self.browser_search:
+            print("\n=== Searching with browser-use ===")
+            for query in search_queries[:3]:  # Limit to first 3 queries
+                print(f"Searching for: {query}")
+                browser_results = await self.browser_search.search_locations(query)
+                candidates.extend(browser_results)
+                print(f"Found {len(browser_results)} browser results for query: {query}")
 
         # Print summary for debugging
         print("\n=== Location Candidates ===")
