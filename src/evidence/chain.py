@@ -1,0 +1,215 @@
+"""Evidence tracking with source hashing and deduplication.
+
+Every piece of information discovered during geolocation is recorded as an Evidence
+object with a content hash for deduplication and a source for traceability.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Optional
+
+from src.utils.geo_math import haversine_distance, validate_coordinates, weighted_centroid
+
+
+class EvidenceSource(str, Enum):
+    EXIF = "exif"
+    VLM_ANALYSIS = "vlm_analysis"
+    VLM_GEO = "vlm_geo"
+    OCR = "ocr"
+    GEOCLIP = "geoclip"
+    STREETCLIP = "streetclip"
+    PIGEON = "pigeon"
+    SERPER = "serper"
+    GOOGLE_MAPS = "google_maps"
+    OSM = "osm"
+    BROWSER = "browser"
+    GEONAMES = "geonames"
+    USER_HINT = "user_hint"
+    REASONING = "reasoning"
+    VISUAL_MATCH = "visual_match"
+
+
+@dataclass
+class Evidence:
+    """A single piece of geolocation evidence."""
+
+    source: EvidenceSource
+    content: str
+    confidence: float  # 0-1, derived from source reliability
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    country: Optional[str] = None
+    region: Optional[str] = None
+    city: Optional[str] = None
+    url: Optional[str] = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    content_hash: str = ""
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.content_hash:
+            self.content_hash = hashlib.sha256(
+                f"{self.source.value}:{self.content}".encode()
+            ).hexdigest()[:16]
+
+        # Validate coordinates if provided
+        if self.latitude is not None and self.longitude is not None:
+            if not validate_coordinates(self.latitude, self.longitude):
+                self.latitude = None
+                self.longitude = None
+
+        self.confidence = max(0.0, min(1.0, self.confidence))
+
+    @property
+    def has_coordinates(self) -> bool:
+        return self.latitude is not None and self.longitude is not None
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source.value,
+            "content": self.content,
+            "confidence": self.confidence,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "country": self.country,
+            "region": self.region,
+            "city": self.city,
+            "url": self.url,
+            "timestamp": self.timestamp.isoformat(),
+            "content_hash": self.content_hash,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Evidence:
+        data = data.copy()
+        data["source"] = EvidenceSource(data["source"])
+        if isinstance(data.get("timestamp"), str):
+            data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+        return cls(**data)
+
+
+@dataclass
+class EvidenceChain:
+    """Collects and aggregates evidence from all agents."""
+
+    evidences: list[Evidence] = field(default_factory=list)
+    _hashes: set[str] = field(default_factory=set, repr=False)
+
+    def add(self, evidence: Evidence) -> bool:
+        """Add evidence if not a duplicate. Returns True if added."""
+        if evidence.content_hash in self._hashes:
+            return False
+        self._hashes.add(evidence.content_hash)
+        self.evidences.append(evidence)
+        return True
+
+    def add_many(self, evidences: list[Evidence]) -> int:
+        """Add multiple evidences, return count of new ones added."""
+        return sum(1 for e in evidences if self.add(e))
+
+    @property
+    def geo_evidences(self) -> list[Evidence]:
+        """Evidences that have coordinates."""
+        return [e for e in self.evidences if e.has_coordinates]
+
+    @property
+    def country_predictions(self) -> list[str]:
+        """All country predictions from evidence."""
+        return [e.country for e in self.evidences if e.country]
+
+    def location_cluster(self) -> Optional[tuple[float, float]]:
+        """Weighted centroid of all coordinate evidence."""
+        points = [
+            (e.latitude, e.longitude, e.confidence)
+            for e in self.geo_evidences
+        ]
+        return weighted_centroid(points)
+
+    def agreement_score(self) -> float:
+        """How much the evidence agrees (0-1).
+
+        Based on geographic spread of coordinate predictions and country agreement.
+        """
+        geo = self.geo_evidences
+        if len(geo) < 2:
+            return 1.0 if geo else 0.0
+
+        # Geographic spread component
+        coords = [(e.latitude, e.longitude) for e in geo]
+        from src.utils.geo_math import geographic_spread
+
+        spread = geographic_spread(coords)
+
+        # Tight cluster (<50km) = high agreement, >500km = low
+        if spread < 50:
+            geo_agreement = 1.0
+        elif spread < 200:
+            geo_agreement = 0.7
+        elif spread < 500:
+            geo_agreement = 0.4
+        else:
+            geo_agreement = 0.2
+
+        # Country agreement component
+        countries = self.country_predictions
+        if countries:
+            from src.utils.geo_math import country_level_agreement
+
+            country_agree = country_level_agreement(countries)
+            return 0.6 * geo_agreement + 0.4 * country_agree
+
+        return geo_agreement
+
+    def by_source(self, source: EvidenceSource) -> list[Evidence]:
+        """Filter evidences by source."""
+        return [e for e in self.evidences if e.source == source]
+
+    def top_evidence(self, n: int = 5) -> list[Evidence]:
+        """Get top N evidences by confidence."""
+        return sorted(self.evidences, key=lambda e: e.confidence, reverse=True)[:n]
+
+    def find_supporting(self, claim_country: str, radius_km: float = 200) -> list[Evidence]:
+        """Find evidences that support a location claim."""
+        supporting = []
+        for e in self.evidences:
+            if e.country and e.country.lower() == claim_country.lower():
+                supporting.append(e)
+        return supporting
+
+    def summary(self) -> dict:
+        """Produce a summary of the evidence chain for logging/display."""
+        cluster = self.location_cluster()
+        return {
+            "total_evidences": len(self.evidences),
+            "geo_evidences": len(self.geo_evidences),
+            "sources": list({e.source.value for e in self.evidences}),
+            "countries_mentioned": list(set(self.country_predictions)),
+            "agreement_score": round(self.agreement_score(), 3),
+            "centroid": {"lat": cluster[0], "lon": cluster[1]} if cluster else None,
+            "top_evidence": [e.to_dict() for e in self.top_evidence(3)],
+        }
+
+    def to_prompt_context(self) -> str:
+        """Format evidence chain as text for LLM prompts."""
+        lines = []
+        for e in sorted(self.evidences, key=lambda x: x.confidence, reverse=True):
+            loc_str = ""
+            if e.has_coordinates:
+                loc_str = f" [{e.latitude:.4f}, {e.longitude:.4f}]"
+            geo_str = ""
+            parts = [p for p in [e.city, e.region, e.country] if p]
+            if parts:
+                geo_str = f" -> {', '.join(parts)}"
+            lines.append(
+                f"- [{e.source.value}] (conf={e.confidence:.2f}){loc_str}{geo_str}: {e.content}"
+            )
+        return "\n".join(lines)
+
+    def clear(self) -> None:
+        self.evidences.clear()
+        self._hashes.clear()
