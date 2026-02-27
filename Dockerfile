@@ -4,8 +4,8 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
+    libgl1 \
+    libglib2.0-0t64 \
     curl \
     chromium \
     chromium-driver \
@@ -19,18 +19,16 @@ RUN mkdir -p /ms-playwright && \
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium --with-deps
-
-# Copy application code
+# Copy source and install Python dependencies
+COPY pyproject.toml .
 COPY src/ ./src/
+RUN pip install --no-cache-dir .
+
+RUN PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium --with-deps || true
 COPY .env .
 
 # Set Python path and environment variables
-ENV PYTHONPATH=/app/src \
+ENV PYTHONPATH=/app \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
@@ -43,11 +41,13 @@ RUN echo '#!/bin/bash\n\
 echo "Starting Xvfb..."\n\
 Xvfb :99 -screen 0 1024x768x16 &\n\
 export DISPLAY=:99\n\
-echo "Starting uvicorn..."\n\
-exec uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload' > /app/start.sh && \
+echo "Starting OpenGeoSpy API..."\n\
+exec uvicorn src.api.app:app --host 0.0.0.0 --port 8000' > /app/start.sh && \
     chmod +x /app/start.sh
 
-# Expose the API port
 EXPOSE 8000
-# Run the startup script
-CMD ["/app/start.sh"] 
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
+
+CMD ["/app/start.sh"]

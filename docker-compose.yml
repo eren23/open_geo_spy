@@ -1,24 +1,23 @@
-name: geolocator
+name: open-geo-spy
 
 services:
-  geolocator:
+  api:
     build: .
-    container_name: geolocator
+    container_name: open-geo-spy-api
     volumes:
-      - ./src:/app/src:ro        # Mount source code read-only
-      - ./images:/app/images     # Mount images directory
-      - ./.env:/app/.env:ro      # Mount env file read-only
+      - ./src:/app/src:ro
+      - ./images:/app/images
+      - ./.env:/app/.env:ro
     environment:
-      - PYTHONUNBUFFERED=1   # Ensure Python output is sent to container logs
+      - PYTHONUNBUFFERED=1
     ports:
-      - "8000:8000"          # If you add a web interface later
+      - "8000:8000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
     restart: unless-stopped
-    # Enable development mode
     develop:
       watch:
         - action: sync
@@ -29,16 +28,16 @@ services:
             - "**/*.pyc"
 
   frontend:
-    build: 
+    build:
       context: ./fe
       dockerfile: Dockerfile
-    container_name: geolocator-frontend
+    container_name: open-geo-spy-frontend
     volumes:
       - ./fe:/app
       - /app/node_modules
     ports:
-      - "3000:3000"
+      - "5173:5173"
     environment:
-      - REACT_APP_API_URL=http://localhost:8000
+      - VITE_API_URL=http://localhost:8000
     depends_on:
-      - geolocator
+      - api

@@ -1,18 +1,12 @@
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
-
-# Create necessary directories
-RUN mkdir -p /app/public /app/src
 
 COPY package*.json ./
 RUN npm install
 
-# Copy project files
-COPY public/ ./public/
-COPY src/ ./src/
-COPY tsconfig.json .
+COPY . .
 
-EXPOSE 3000
+EXPOSE 5173
 
-CMD ["npm", "start"] 
+CMD ["npm", "run", "dev", "--", "--host"]
