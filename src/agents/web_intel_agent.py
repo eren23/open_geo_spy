@@ -38,6 +38,7 @@ class WebIntelAgent:
         self._osm = OSMClient(cache=cache)
         self._browser_pool = None
         self._browser_search = None
+        self._api_semaphore = asyncio.Semaphore(10)
 
         # Smart query expansion via LLM
         client = AsyncOpenAI(
@@ -188,7 +189,7 @@ class WebIntelAgent:
             node.status = SearchNodeStatus.RUNNING
             start = _time.monotonic()
             try:
-                evidences = await self._serper_search(node.query)
+                evidences = await self._provider_search(node.query)
                 node.status = SearchNodeStatus.COMPLETED
                 node.evidence_count = len(evidences)
                 node.best_confidence = max((e.confidence for e in evidences), default=0.0)
@@ -274,20 +275,21 @@ class WebIntelAgent:
         return unique
 
     async def _provider_search(self, query: str) -> list[Evidence]:
-        """Search across all configured providers in parallel."""
+        """Search across all configured providers in parallel (capped by semaphore)."""
         if not self._providers:
             return []
 
         async def _search_one(provider: SearchProvider) -> list[Evidence]:
-            results = await provider.search(query, num_results=5)
-            evidences = provider.results_to_evidence(results, query)
+            async with self._api_semaphore:
+                results = await provider.search(query, num_results=5)
+                evidences = provider.results_to_evidence(results, query)
 
-            # Serper-specific: also try places search for geo data
-            if hasattr(provider, "search_places"):
-                places = await provider.search_places(query)
-                evidences.extend(provider.results_to_evidence(places, query))
+                # Serper-specific: also try places search for geo data
+                if hasattr(provider, "search_places"):
+                    places = await provider.search_places(query)
+                    evidences.extend(provider.results_to_evidence(places, query))
 
-            return evidences
+                return evidences
 
         all_results = await asyncio.gather(
             *[_search_one(p) for p in self._providers],
@@ -303,8 +305,6 @@ class WebIntelAgent:
 
         return evidences
 
-    # Keep backward-compatible alias
-    _serper_search = _provider_search
 
     async def _osm_search(self, lat: float, lon: float) -> list[Evidence]:
         """Search OSM for nearby POIs."""

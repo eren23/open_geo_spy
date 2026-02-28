@@ -32,6 +32,29 @@ class ChatHandler:
         from src.agents.reasoning_agent import ReasoningAgent
         self._reasoning_agent = ReasoningAgent(settings)
 
+    def _build_chain_from_state(self, session: Session) -> EvidenceChain:
+        """Build an EvidenceChain from session state, handling both Evidence objects and dicts."""
+        chain = EvidenceChain()
+        for e in session.pipeline_state.get("evidences", []):
+            if isinstance(e, Evidence):
+                chain.add(e)
+            elif isinstance(e, dict):
+                try:
+                    chain.add(Evidence(
+                        source=EvidenceSource(e.get("source", "reasoning")),
+                        content=e.get("content", ""),
+                        confidence=e.get("confidence", 0.5),
+                        latitude=e.get("latitude"),
+                        longitude=e.get("longitude"),
+                        country=e.get("country"),
+                        region=e.get("region"),
+                        city=e.get("city"),
+                        metadata=e.get("metadata", {}),
+                    ))
+                except (ValueError, KeyError):
+                    logger.debug("Skipping malformed evidence dict: {}", e)
+        return chain
+
     async def handle_message(
         self,
         session_id: str,
@@ -123,9 +146,15 @@ Be specific and cite evidence sources."""
                     "step": f"Found {len(new_evidences)} new evidence items",
                 }
 
-                # Append new evidences to session pipeline state
+                # Append new evidences to session pipeline state (cap at 200)
                 existing_evidences = session.pipeline_state.get("evidences", [])
                 existing_evidences.extend(new_evidences)
+                if len(existing_evidences) > 200:
+                    existing_evidences.sort(
+                        key=lambda e: e.confidence if isinstance(e, Evidence) else e.get("confidence", 0),
+                        reverse=True,
+                    )
+                    existing_evidences = existing_evidences[:200]
                 session.pipeline_state["evidences"] = existing_evidences
 
                 # Summarize findings
@@ -138,11 +167,10 @@ Be specific and cite evidence sources."""
                     # Re-run reasoning with augmented evidence
                     yield {"event": "chat_step", "step": "Re-analyzing with new evidence..."}
                     try:
-                        chain = EvidenceChain()
-                        for e in existing_evidences:
-                            if isinstance(e, Evidence):
-                                chain.add(e)
-                        updated = await self._reasoning_agent.reason_multi_candidate(chain)
+                        chain = self._build_chain_from_state(session)
+                        updated = await self._reasoning_agent.reason_multi_candidate(
+                            chain, skip_verification=True,
+                        )
                         if updated:
                             session.pipeline_state["ranked_candidates"] = updated
                             session.pipeline_state["prediction"] = updated[0]
@@ -176,20 +204,24 @@ Be specific and cite evidence sources."""
             confidence=0.7,
         )
 
-        # Append hint evidence to session pipeline state
+        # Append hint evidence to session pipeline state (cap at 200)
         evidences = session.pipeline_state.get("evidences", [])
         evidences.append(hint_evidence)
+        if len(evidences) > 200:
+            evidences.sort(
+                key=lambda e: e.confidence if isinstance(e, Evidence) else e.get("confidence", 0),
+                reverse=True,
+            )
+            evidences = evidences[:200]
         session.pipeline_state["evidences"] = evidences
 
         # Re-run reasoning with augmented evidence
         yield {"event": "chat_step", "step": "Re-analyzing with your hint..."}
         try:
-            chain = EvidenceChain()
-            for e in evidences:
-                if isinstance(e, Evidence):
-                    chain.add(e)
-
-            updated = await self._reasoning_agent.reason_multi_candidate(chain)
+            chain = self._build_chain_from_state(session)
+            updated = await self._reasoning_agent.reason_multi_candidate(
+                chain, skip_verification=True,
+            )
             if updated:
                 session.pipeline_state["ranked_candidates"] = updated
                 session.pipeline_state["prediction"] = updated[0]

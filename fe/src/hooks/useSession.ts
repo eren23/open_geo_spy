@@ -227,7 +227,10 @@ export function useSession(): UseSessionReturn {
                   centroid: rawSummary.centroid
                     ? { latitude: (rawSummary.centroid as any).lat, longitude: (rawSummary.centroid as any).lon }
                     : undefined,
-                  top_evidence: rawSummary.top_evidence as EvidenceSummary['top_evidence'],
+                  top_evidence: (rawSummary.top_evidence as any[] | undefined)?.map((e: any) => ({
+                    ...e,
+                    confidence: e.confidence ?? 0,
+                  })) as EvidenceSummary['top_evidence'],
                 });
               }
 

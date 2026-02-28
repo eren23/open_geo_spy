@@ -46,6 +46,7 @@ class MLEnsembleAgent:
         self,
         image_path: str,
         feature_evidence: EvidenceChain | None = None,
+        candidate_cities: list[str] | None = None,
     ) -> EvidenceChain:
         """Run all enabled ML models in parallel and return aggregated evidence."""
         chain = EvidenceChain()
@@ -56,8 +57,8 @@ class MLEnsembleAgent:
         if feature_evidence:
             context["evidence_text"] = feature_evidence.to_prompt_context()
         # Pass candidate cities for StreetCLIP city prediction
-        if hasattr(self, "_candidate_cities") and self._candidate_cities:
-            context["candidate_cities"] = self._candidate_cities
+        if candidate_cities:
+            context["candidate_cities"] = candidate_cities
 
         # Discover enabled models from registry
         models = ModelRegistry.get_enabled(self.settings)
@@ -85,11 +86,11 @@ class MLEnsembleAgent:
             if isinstance(result, list) and result:
                 evidences = model.to_evidence(result)
 
-                # Apply per-model weight from settings (or model default)
+                # Store per-model weight as metadata for ensemble voting (Fix D:
+                # don't multiply confidence directly — it inflates values to 1.0)
                 weight = self.settings.ml.model_weights.get(name, model.info().default_weight)
-                if weight != 1.0:
-                    for ev in evidences:
-                        ev.confidence = min(1.0, ev.confidence * weight)
+                for ev in evidences:
+                    ev.metadata["model_weight"] = weight
 
                 added = chain.add_many(evidences)
                 logger.info("{}: {} predictions -> {} new evidence (weight={:.1f})", name, len(result), added, weight)
@@ -110,7 +111,7 @@ class MLEnsembleAgent:
         return chain
 
     def _calculate_ensemble_confidence(self, results: dict[str, Any]) -> Evidence | None:
-        """Calculate real confidence from model agreement using weighted voting."""
+        """Calculate real confidence from model agreement using per-model top-1 weighted voting."""
         countries = []
         country_weights = []
         coords = []
@@ -122,16 +123,22 @@ class MLEnsembleAgent:
             # Look up model weight for weighted voting
             weight = self.settings.ml.model_weights.get(name, 1.0)
 
+            # Only use the top prediction per model (Fix C: prevents top-K
+            # predictions from giving one model disproportionate voting power)
             if isinstance(result, list):
+                top_pred = None
                 for pred in result:
                     if isinstance(pred, dict):
-                        if pred.get("country"):
-                            countries.append(pred["country"])
-                            country_weights.append(weight)
-                        lat = pred.get("lat") or pred.get("latitude")
-                        lon = pred.get("lon") or pred.get("longitude")
-                        if lat is not None and lon is not None:
-                            coords.append((float(lat), float(lon)))
+                        top_pred = pred
+                        break
+                if top_pred:
+                    if top_pred.get("country"):
+                        countries.append(top_pred["country"])
+                        country_weights.append(weight)
+                    lat = top_pred.get("lat") or top_pred.get("latitude")
+                    lon = top_pred.get("lon") or top_pred.get("longitude")
+                    if lat is not None and lon is not None:
+                        coords.append((float(lat), float(lon)))
 
         if not countries and not coords:
             return None

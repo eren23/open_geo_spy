@@ -92,12 +92,15 @@ class ReasoningAgent:
         self,
         evidence_chain: EvidenceChain,
         features: dict[str, Any] | None = None,
+        skip_verification: bool = False,
     ) -> dict[str, Any]:
         """Synthesize all evidence into a final location prediction.
 
         Args:
             evidence_chain: Combined evidence from all agents
             features: Raw visual features (for environment type)
+            skip_verification: When True, skip CoVe verification (used by chat handlers
+                for faster re-reasoning)
 
         Returns:
             Final prediction dict with location, confidence, reasoning, evidence trail.
@@ -142,46 +145,50 @@ class ReasoningAgent:
 
         # Full CoVe verification when visual verification is enabled;
         # fall back to quick_verify on error or when disabled.
-        try:
-            if self.settings.ml.enable_visual_verification:
-                result = await self.verifier.verify(prediction, evidence_chain)
-                prediction["confidence"] = result.confidence
-                prediction["verified"] = result.verified
-                prediction["claims"] = [
-                    {
-                        "text": c.text,
-                        "status": c.status.value,
-                        "supporting": c.supporting_evidence,
-                        "contradicting": c.contradicting_evidence,
-                        "confidence": c.confidence,
-                    }
-                    for c in result.claims
-                ]
-                prediction["contradictions"] = result.contradictions
-                if not result.verified:
-                    logger.warning("Full verification flagged prediction: {}", result.reason)
-                    prediction["verification_warning"] = result.reason
-            else:
-                # Fast-path verification
-                is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
-                    prediction, evidence_chain
-                )
-                prediction["confidence"] = adjusted_conf
-                prediction["verified"] = is_plausible
-                if not is_plausible:
-                    prediction["verification_warning"] = reason
-        except Exception as e:
-            logger.warning("Full verification failed, falling back to quick_verify: {}", e)
+        # Skip entirely when called from chat handlers for faster response.
+        if skip_verification:
+            prediction["verified"] = False
+        else:
             try:
-                is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
-                    prediction, evidence_chain
-                )
-                prediction["confidence"] = adjusted_conf
-                prediction["verified"] = is_plausible
-                if not is_plausible:
-                    prediction["verification_warning"] = reason
-            except Exception as e2:
-                logger.warning("Quick verification also failed: {}", e2)
+                if self.settings.ml.enable_visual_verification:
+                    result = await self.verifier.verify(prediction, evidence_chain)
+                    prediction["confidence"] = result.confidence
+                    prediction["verified"] = result.verified
+                    prediction["claims"] = [
+                        {
+                            "text": c.text,
+                            "status": c.status.value,
+                            "supporting": c.supporting_evidence,
+                            "contradicting": c.contradicting_evidence,
+                            "confidence": c.confidence,
+                        }
+                        for c in result.claims
+                    ]
+                    prediction["contradictions"] = result.contradictions
+                    if not result.verified:
+                        logger.warning("Full verification flagged prediction: {}", result.reason)
+                        prediction["verification_warning"] = result.reason
+                else:
+                    # Fast-path verification
+                    is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
+                        prediction, evidence_chain
+                    )
+                    prediction["confidence"] = adjusted_conf
+                    prediction["verified"] = is_plausible
+                    if not is_plausible:
+                        prediction["verification_warning"] = reason
+            except Exception as e:
+                logger.warning("Full verification failed, falling back to quick_verify: {}", e)
+                try:
+                    is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
+                        prediction, evidence_chain
+                    )
+                    prediction["confidence"] = adjusted_conf
+                    prediction["verified"] = is_plausible
+                    if not is_plausible:
+                        prediction["verification_warning"] = reason
+                except Exception as e2:
+                    logger.warning("Quick verification also failed: {}", e2)
 
         # Add evidence trail to result
         prediction["evidence_trail"] = [e.to_dict() for e in evidence_chain.top_evidence(10)]
@@ -200,6 +207,7 @@ class ReasoningAgent:
         evidence_chain: EvidenceChain,
         features: dict[str, Any] | None = None,
         max_candidates: int = 5,
+        skip_verification: bool = False,
     ) -> list[dict[str, Any]]:
         """Produce top-N ranked candidate locations.
 
@@ -210,7 +218,7 @@ class ReasoningAgent:
         from src.utils.geo_math import haversine_distance
 
         # Get single prediction as primary
-        primary = await self.reason(evidence_chain, features)
+        primary = await self.reason(evidence_chain, features, skip_verification=skip_verification)
         candidates = [primary]
 
         # Cluster geo evidences

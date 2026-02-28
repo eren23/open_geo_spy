@@ -127,11 +127,9 @@ async def ml_ensemble_node(
             if city_name not in candidate_cities:
                 candidate_cities.append(city_name)
 
-        # Pass candidate cities to ML ensemble so StreetCLIP can use them
-        if candidate_cities:
-            agent._candidate_cities = candidate_cities
-
-        chain = await agent.predict(state["image_path"], feature_chain)
+        chain = await agent.predict(
+            state["image_path"], feature_chain, candidate_cities=candidate_cities or None,
+        )
         duration = round((time.monotonic() - start) * 1000, 1)
 
         writer({

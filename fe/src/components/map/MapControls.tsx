@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type RefObject } from 'react';
 import type { Map as LeafletMap } from 'leaflet';
 import type { CandidateResult, EvidenceItem } from '../../types';
 import EvidenceCard from '../evidence/EvidenceCard';
@@ -26,7 +26,7 @@ function rankBg(rank: number): string {
 
 interface MapControlsProps {
   candidates: CandidateResult[];
-  mapRef: React.RefObject<LeafletMap | null>;
+  mapRef: RefObject<LeafletMap | null>;
   selectedCandidateRank: number;
   selectCandidate: (rank: number) => void;
   pipelineEvidences?: EvidenceItem[];
@@ -61,7 +61,7 @@ export default function MapControls({
   }
 
   return (
-    <div className="flex flex-col gap-2 w-72 max-h-[calc(100vh-100px)] overflow-y-auto">
+    <div className="flex flex-col gap-2 w-72 max-h-[calc(50vh-16px)] md:max-h-[calc(100vh-100px)] overflow-y-auto">
       {/* Header */}
       <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
         Candidates
@@ -206,6 +206,9 @@ export default function MapControls({
           >
             <span className="text-xs font-semibold text-gray-700">
               Evidence Provenance
+              <span className="text-[10px] text-gray-400 ml-1">
+                {selected.evidence_trail.length ? `(#${selected.rank})` : '(pipeline)'}
+              </span>
             </span>
             <svg
               className={`h-4 w-4 text-gray-400 transition-transform ${provenanceExpanded ? 'rotate-180' : ''}`}
@@ -219,7 +222,7 @@ export default function MapControls({
             </svg>
           </button>
           {provenanceExpanded && (
-            <ProvenanceDashboard evidences={provenanceEvidences} />
+            <ProvenanceDashboard evidences={provenanceEvidences} headless />
           )}
         </div>
       )}

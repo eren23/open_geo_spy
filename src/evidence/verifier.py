@@ -7,6 +7,7 @@ and detects hallucinations.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -100,11 +101,22 @@ class LocationVerifier:
                     verified=False, confidence=0.0, reason="Could not decompose prediction into verifiable claims"
                 )
 
-            # Step 2-3: Verify each claim against evidence
+            # Steps 2-4: Verify claims and detect contradictions in parallel.
+            # _detect_contradictions only needs the claims list (not the
+            # verified results), so it can run concurrently with verification.
             evidence_context = evidence_chain.to_prompt_context()
-            verified_claims = await self._verify_claims(claims, evidence_context)
+            verified_claims_task = asyncio.create_task(
+                self._verify_claims(claims, evidence_context)
+            )
+            # Pre-create placeholder claims for contradiction detection
+            placeholder_claims = [Claim(text=c) for c in claims]
+            contradictions_from_placeholders = self._detect_contradictions(
+                placeholder_claims, evidence_chain
+            )
 
-            # Step 4: Detect contradictions
+            verified_claims = await verified_claims_task
+
+            # Run contradiction detection again with verified statuses
             contradictions = self._detect_contradictions(verified_claims, evidence_chain)
 
             # Step 5: Aggregate

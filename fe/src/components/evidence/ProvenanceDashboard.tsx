@@ -7,6 +7,8 @@ import type { EvidenceItem } from '../../types';
 
 interface ProvenanceDashboardProps {
   evidences: EvidenceItem[];
+  /** When true, skip the outer card shell and header (used when embedded in MapControls). */
+  headless?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +69,7 @@ function getStageForSource(source: string): string {
 // ProvenanceDashboard
 // ---------------------------------------------------------------------------
 
-export default function ProvenanceDashboard({ evidences }: ProvenanceDashboardProps) {
+export default function ProvenanceDashboard({ evidences, headless = false }: ProvenanceDashboardProps) {
   // Group evidence by source
   const sourceGroups = useMemo(() => {
     const groups = new Map<string, EvidenceItem[]>();
@@ -110,9 +112,77 @@ export default function ProvenanceDashboard({ evidences }: ProvenanceDashboardPr
   }, [evidences]);
 
   if (evidences.length === 0) {
+    if (headless) return null;
     return (
       <div className="rounded-xl border border-gray-200 bg-white p-8 text-center">
         <p className="text-sm text-gray-500">No evidence data available.</p>
+      </div>
+    );
+  }
+
+  // Compact vertical layout for embedding in narrow containers (e.g. MapControls sidebar)
+  if (headless) {
+    return (
+      <div className="flex flex-col gap-2 p-3">
+        {PIPELINE_STAGES.map((stage, idx) => {
+          const group = stageGroups.get(stage.id);
+          const count = group?.total ?? 0;
+          const hasData = count > 0;
+
+          return (
+            <div key={stage.id}>
+              <div
+                className={`rounded-lg border px-3 py-2 transition-colors ${
+                  hasData ? stage.borderColor : 'border-gray-200'
+                } ${hasData ? stage.lightColor : 'bg-gray-50'}`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`h-2 w-2 rounded-full flex-shrink-0 ${hasData ? stage.color : 'bg-gray-300'}`} />
+                  <span className={`text-[11px] font-semibold ${hasData ? 'text-gray-900' : 'text-gray-400'}`}>
+                    {stage.label}
+                  </span>
+                  <span className={`ml-auto text-[10px] ${hasData ? 'text-gray-600' : 'text-gray-400'}`}>
+                    {count} ev.
+                    {hasData && group!.avgConfidence > 0 && (
+                      <> &middot; {(group!.avgConfidence * 100).toFixed(0)}%</>
+                    )}
+                  </span>
+                </div>
+                {hasData && (
+                  <div className="mt-1.5 flex rounded-full overflow-hidden h-1">
+                    {Array.from(group!.sources.entries()).map(([src, cnt]) => (
+                      <div
+                        key={src}
+                        className={stage.color}
+                        style={{
+                          width: `${(cnt / count) * 100}%`,
+                          opacity: 0.5 + 0.5 * (cnt / count),
+                        }}
+                        title={`${src}: ${cnt}`}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+              {idx < PIPELINE_STAGES.length - 1 && (
+                <div className="flex justify-center py-0.5">
+                  <svg width="8" height="10" viewBox="0 0 8 10" fill="none" className="text-gray-300">
+                    <path d="M4 0v7m0 0L1 4m3 3l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {/* Compact output summary */}
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-center">
+          <span className="text-[10px] text-blue-600 font-semibold uppercase tracking-wider">
+            {(finalConfidence * 100).toFixed(0)}% confidence
+          </span>
+          <span className="text-[10px] text-gray-500 ml-1">
+            &middot; {evidences.length} evidence &middot; {sourceGroups.size} sources
+          </span>
+        </div>
       </div>
     );
   }
