@@ -53,12 +53,14 @@ interface MapViewProps {
   candidates: CandidateResult[];
   /** Optional ref forwarded to the underlying Leaflet Map instance */
   mapRef?: React.MutableRefObject<L.Map | null>;
+  /** Called when a marker is clicked */
+  onSelectCandidate?: (rank: number) => void;
 }
 
 const DEFAULT_CENTER: [number, number] = [20, 0];
 const DEFAULT_ZOOM = 2;
 
-export default function MapView({ candidates, mapRef }: MapViewProps) {
+export default function MapView({ candidates, mapRef, onSelectCandidate }: MapViewProps) {
   return (
     <MapContainer
       center={DEFAULT_CENTER}
@@ -74,7 +76,7 @@ export default function MapView({ candidates, mapRef }: MapViewProps) {
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       />
-      <CandidateMarkers candidates={candidates} />
+      <CandidateMarkers candidates={candidates} onSelectCandidate={onSelectCandidate} />
       <FitBounds candidates={candidates} />
     </MapContainer>
   );

@@ -14,6 +14,8 @@ function App() {
     messages,
     loading,
     error,
+    selectedCandidateRank,
+    selectCandidate,
     create,
     sendMessage,
   } = useSession();
@@ -73,10 +75,19 @@ function App() {
   // Right panel: map
   const rightPanel = (
     <div className="relative h-full">
-      <MapView candidates={candidates} mapRef={mapRef} />
+      <MapView
+        candidates={candidates}
+        mapRef={mapRef}
+        onSelectCandidate={selectCandidate}
+      />
       {candidates.length > 0 && (
         <div className="absolute top-2 right-2 z-[1000]">
-          <MapControls candidates={candidates} mapRef={mapRef} />
+          <MapControls
+            candidates={candidates}
+            mapRef={mapRef}
+            selectedCandidateRank={selectedCandidateRank}
+            selectCandidate={selectCandidate}
+          />
         </div>
       )}
     </div>

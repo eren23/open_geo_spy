@@ -11,6 +11,28 @@ export type { EvidenceItem, PipelineStep, SSEEvent } from './api';
 import type { EvidenceItem } from './api';
 
 // ---------------------------------------------------------------------------
+// Evidence summary & pipeline result (from backend SSE result event)
+// ---------------------------------------------------------------------------
+
+/** Top-level evidence summary returned alongside candidates. */
+export interface EvidenceSummary {
+  sources: string[];
+  countries: string[];
+  agreement_score: number;
+  centroid?: { latitude: number; longitude: number };
+  top_evidence?: EvidenceItem[];
+}
+
+/** Top-level pipeline result metadata. */
+export interface PipelineResultMeta {
+  elapsed_ms: number;
+  total_evidence_count: number;
+  verified: boolean;
+  verification_warning?: string;
+  reasoning?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Multi-candidate result
 // ---------------------------------------------------------------------------
 

@@ -1,6 +1,11 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { SSEEvent } from '../api';
-import type { CandidateResult, ChatMessage } from '../types';
+import type {
+  CandidateResult,
+  ChatMessage,
+  EvidenceSummary,
+  PipelineResultMeta,
+} from '../types';
 import { useChatMessages } from './useChatMessages';
 
 const API_URL = import.meta.env.VITE_API_URL || '';
@@ -20,6 +25,16 @@ export interface UseSessionReturn {
   loading: boolean;
   /** Latest error, if any. */
   error: Error | null;
+  /** Evidence summary from the pipeline result. */
+  evidenceSummary: EvidenceSummary | null;
+  /** Top-level pipeline result metadata. */
+  pipelineResult: PipelineResultMeta | null;
+  /** Rank of the currently selected candidate (1-based). */
+  selectedCandidateRank: number;
+  /** The currently selected candidate (derived). */
+  selectedCandidate: CandidateResult | null;
+  /** Select a candidate by rank. */
+  selectCandidate: (rank: number) => void;
   /**
    * Start a new locate session.
    * Streams from `/api/v2/locate/stream` and populates candidates + messages.
@@ -123,6 +138,18 @@ export function useSession(): UseSessionReturn {
   const [candidates, setCandidates] = useState<CandidateResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [evidenceSummary, setEvidenceSummary] = useState<EvidenceSummary | null>(null);
+  const [pipelineResult, setPipelineResult] = useState<PipelineResultMeta | null>(null);
+  const [selectedCandidateRank, setSelectedCandidateRank] = useState(1);
+
+  const selectedCandidate = useMemo(
+    () => candidates.find((c) => c.rank === selectedCandidateRank) ?? null,
+    [candidates, selectedCandidateRank],
+  );
+
+  const selectCandidate = useCallback((rank: number) => {
+    setSelectedCandidateRank(rank);
+  }, []);
 
   const { messages, addMessage, addAgentStep, clear: clearMessages } = useChatMessages();
   const cancelRef = useRef<(() => void) | null>(null);
@@ -138,6 +165,9 @@ export function useSession(): UseSessionReturn {
       setCandidates([]);
       setError(null);
       setSessionId(null);
+      setEvidenceSummary(null);
+      setPipelineResult(null);
+      setSelectedCandidateRank(1);
       clearMessages();
       setLoading(true);
 
@@ -187,12 +217,62 @@ export function useSession(): UseSessionReturn {
               setCandidates(resultCandidates);
               if (sid) setSessionId(sid);
 
-              // Produce a summary assistant message
+              // Store evidence summary
+              const rawSummary = data.evidence_summary as Record<string, unknown> | undefined;
+              if (rawSummary) {
+                setEvidenceSummary({
+                  sources: (rawSummary.sources ?? []) as string[],
+                  countries: (rawSummary.countries ?? []) as string[],
+                  agreement_score: (rawSummary.agreement_score ?? 0) as number,
+                  centroid: rawSummary.centroid as EvidenceSummary['centroid'],
+                  top_evidence: rawSummary.top_evidence as EvidenceSummary['top_evidence'],
+                });
+              }
+
+              // Store pipeline result metadata
+              setPipelineResult({
+                elapsed_ms: (data.elapsed_ms ?? 0) as number,
+                total_evidence_count: (data.total_evidence_count ?? 0) as number,
+                verified: (data.verified ?? false) as boolean,
+                verification_warning: data.verification_warning as string | undefined,
+                reasoning: data.reasoning as string | undefined,
+              });
+
+              // Produce a structured summary assistant message
               if (resultCandidates.length > 0) {
                 const top = resultCandidates[0];
+                const confPct = (top.confidence * 100).toFixed(0);
+                const totalEvidence = (data.total_evidence_count ?? 0) as number;
+                const sources = rawSummary?.sources as string[] | undefined;
+                const countries = rawSummary?.countries as string[] | undefined;
+                const agreementScore = rawSummary?.agreement_score as number | undefined;
+
+                let summary = `I identified **${top.name}** with **${confPct}%** confidence.\n\n`;
+
+                if (totalEvidence > 0 || sources?.length) {
+                  const parts: string[] = [];
+                  if (totalEvidence > 0) parts.push(`${totalEvidence} pieces`);
+                  if (sources?.length) parts.push(`from ${sources.length} sources (${sources.join(', ')})`);
+                  summary += `**Evidence:** ${parts.join(' ')}\n`;
+                }
+
+                if (countries?.length) {
+                  summary += `**Countries mentioned:** ${countries.join(', ')}\n`;
+                }
+
+                if (agreementScore != null) {
+                  summary += `**Agreement score:** ${(agreementScore * 100).toFixed(0)}%\n`;
+                }
+
+                summary += `\n${top.reasoning}`;
+
+                if (resultCandidates.length > 1) {
+                  summary += `\n\nI also found ${resultCandidates.length - 1} alternative candidate${resultCandidates.length > 2 ? 's' : ''} — click them on the map or sidebar to compare.`;
+                }
+
                 addMessage({
                   role: 'assistant',
-                  content: `I identified **${top.name}** (confidence ${(top.confidence * 100).toFixed(0)}%). ${top.reasoning}`,
+                  content: summary,
                   timestamp: new Date().toISOString(),
                   metadata: { candidates: resultCandidates.length },
                 });
@@ -314,6 +394,11 @@ export function useSession(): UseSessionReturn {
     messages,
     loading,
     error,
+    evidenceSummary,
+    pipelineResult,
+    selectedCandidateRank,
+    selectedCandidate,
+    selectCandidate,
     create,
     sendMessage,
     cancel,

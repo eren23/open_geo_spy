@@ -97,9 +97,11 @@ function AgentStepMessage({ message }: AgentStepMessageProps) {
   const status = (meta.status as string) || 'pending';
   const detail = (meta.detail as string | undefined);
 
-  // Try to parse evidence count from the detail string (e.g. "4 evidence in 320ms")
+  // Try to parse evidence count and duration from the detail string (e.g. "4 evidence in 320ms")
   const evidenceMatch = typeof detail === 'string' ? detail.match(/^(\d+)\s+evidence/) : null;
   const evidenceCount = evidenceMatch ? parseInt(evidenceMatch[1], 10) : null;
+  const durationMatch = typeof detail === 'string' ? detail.match(/in\s+(\d+)ms/) : null;
+  const durationMs = durationMatch ? parseInt(durationMatch[1], 10) : null;
 
   const label = STEP_LABELS[step] || step.replace(/_/g, ' ');
 
@@ -126,6 +128,12 @@ function AgentStepMessage({ message }: AgentStepMessageProps) {
           {evidenceCount !== null && evidenceCount > 0 && (
             <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-500">
               {evidenceCount} evidence
+            </span>
+          )}
+
+          {durationMs !== null && status === 'completed' && (
+            <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-400">
+              {durationMs}ms
             </span>
           )}
         </div>
