@@ -222,9 +222,11 @@ export function useSession(): UseSessionReturn {
               if (rawSummary) {
                 setEvidenceSummary({
                   sources: (rawSummary.sources ?? []) as string[],
-                  countries: (rawSummary.countries ?? []) as string[],
+                  countries: (rawSummary.countries_mentioned ?? []) as string[],
                   agreement_score: (rawSummary.agreement_score ?? 0) as number,
-                  centroid: rawSummary.centroid as EvidenceSummary['centroid'],
+                  centroid: rawSummary.centroid
+                    ? { latitude: (rawSummary.centroid as any).lat, longitude: (rawSummary.centroid as any).lon }
+                    : undefined,
                   top_evidence: rawSummary.top_evidence as EvidenceSummary['top_evidence'],
                 });
               }
@@ -244,7 +246,7 @@ export function useSession(): UseSessionReturn {
                 const confPct = (top.confidence * 100).toFixed(0);
                 const totalEvidence = (data.total_evidence_count ?? 0) as number;
                 const sources = rawSummary?.sources as string[] | undefined;
-                const countries = rawSummary?.countries as string[] | undefined;
+                const countries = rawSummary?.countries_mentioned as string[] | undefined;
                 const agreementScore = rawSummary?.agreement_score as number | undefined;
 
                 let summary = `I identified **${top.name}** with **${confPct}%** confidence.\n\n`;
