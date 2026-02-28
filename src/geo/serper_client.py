@@ -14,9 +14,10 @@ from loguru import logger
 from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.provider_base import SearchProvider
 
 
-class SerperClient:
+class SerperClient(SearchProvider):
     """Serper.dev SERP API for Google search results."""
 
     BASE_URL = "https://google.serper.dev"
@@ -28,6 +29,10 @@ class SerperClient:
             timeout=15.0,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
         )
+
+    @property
+    def name(self) -> str:
+        return "serper"
 
     @cached("serper", 7200)
     async def search(self, query: str, num_results: int = 10) -> list[dict[str, Any]]:

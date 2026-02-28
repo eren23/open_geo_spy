@@ -12,6 +12,7 @@ from typing import Any, Optional
 from typing_extensions import Annotated, TypedDict
 
 from src.evidence.chain import Evidence
+from src.search.graph import SearchGraph
 
 
 def _merge_evidence(left: list[Evidence], right: list[Evidence]) -> list[Evidence]:
@@ -54,7 +55,7 @@ class PipelineState(TypedDict, total=False):
     candidates: Annotated[list[dict], operator.add]
 
     # --- Search graph (set by web_intel node) ---
-    search_graph: Optional[Any]  # SearchGraph from src.search.graph
+    search_graph: Optional[SearchGraph]
 
     # --- Final output (set by reasoning node) ---
     prediction: dict

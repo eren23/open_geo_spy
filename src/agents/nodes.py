@@ -115,6 +115,22 @@ async def ml_ensemble_node(
 
     try:
         feature_chain = _build_chain_from_state(state)
+
+        # Build candidate cities from existing evidence (VLM Geo predictions, OCR mentions)
+        candidate_cities: list[str] = []
+        for e in feature_chain.evidences:
+            if e.city and e.city not in candidate_cities:
+                candidate_cities.append(e.city)
+        # Also pull from OCR-detected cities if available
+        ocr = state.get("ocr_result", {})
+        for city_name in ocr.get("cities", []):
+            if city_name not in candidate_cities:
+                candidate_cities.append(city_name)
+
+        # Pass candidate cities to ML ensemble so StreetCLIP can use them
+        if candidate_cities:
+            agent._candidate_cities = candidate_cities
+
         chain = await agent.predict(state["image_path"], feature_chain)
         duration = round((time.monotonic() - start) * 1000, 1)
 
@@ -171,7 +187,7 @@ async def web_intelligence_node(
         features = state.get("features", {})
         ocr_result = state.get("ocr_result", {})
 
-        chain = await agent.search(
+        chain, search_graph = await agent.search(
             evidence_chain,
             features,
             ocr_result,
@@ -190,6 +206,7 @@ async def web_intelligence_node(
 
         return {
             "evidences": _chain_to_evidences(chain),
+            "search_graph": search_graph,
             "step_results": [{
                 "name": "web_intelligence",
                 "status": "completed",

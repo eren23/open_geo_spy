@@ -28,6 +28,9 @@ class ChatHandler:
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )
+        # Reasoning agent for re-running predictions after evidence updates
+        from src.agents.reasoning_agent import ReasoningAgent
+        self._reasoning_agent = ReasoningAgent(settings)
 
     async def handle_message(
         self,
@@ -112,21 +115,43 @@ Be specific and cite evidence sources."""
             if self.settings.geo.serper_api_key:
                 serper = SerperClient(self.settings.geo.serper_api_key)
                 results = await serper.search(query, num_results=5)
-                evidences = serper.results_to_evidence(results, query)
+                new_evidences = serper.results_to_evidence(results, query)
                 await serper.close()
 
                 yield {
                     "event": "chat_step",
-                    "step": f"Found {len(evidences)} new evidence items",
+                    "step": f"Found {len(new_evidences)} new evidence items",
                 }
 
+                # Append new evidences to session pipeline state
+                existing_evidences = session.pipeline_state.get("evidences", [])
+                existing_evidences.extend(new_evidences)
+                session.pipeline_state["evidences"] = existing_evidences
+
                 # Summarize findings
-                if evidences:
+                if new_evidences:
                     evidence_text = "\n".join(
                         f"- {e.content} (conf={e.confidence:.2f})"
-                        for e in evidences[:5]
+                        for e in new_evidences[:5]
                     )
-                    answer = f"Search results for '{query}':\n\n{evidence_text}"
+
+                    # Re-run reasoning with augmented evidence
+                    yield {"event": "chat_step", "step": "Re-analyzing with new evidence..."}
+                    try:
+                        chain = EvidenceChain()
+                        for e in existing_evidences:
+                            if isinstance(e, Evidence):
+                                chain.add(e)
+                        updated = await self._reasoning_agent.reason_multi_candidate(chain)
+                        if updated:
+                            session.pipeline_state["ranked_candidates"] = updated
+                            session.pipeline_state["prediction"] = updated[0]
+                            yield {"event": "candidates_update", "candidates": updated}
+
+                        answer = f"Search results for '{query}':\n\n{evidence_text}\n\nPredictions have been updated with this new evidence."
+                    except Exception as re_err:
+                        logger.warning("Re-reasoning after search failed: {}", re_err)
+                        answer = f"Search results for '{query}':\n\n{evidence_text}"
                 else:
                     answer = f"No results found for '{query}'."
 
@@ -144,18 +169,43 @@ Be specific and cite evidence sources."""
         """Handle user providing a location hint."""
         yield {"event": "chat_step", "step": "Incorporating your hint..."}
 
-        # Add as USER_HINT evidence
+        # Add as USER_HINT evidence to session state
         hint_evidence = Evidence(
             source=EvidenceSource.USER_HINT,
             content=f"User hint: {message}",
             confidence=0.7,
         )
 
-        answer = (
-            f"Thanks for the hint! I've noted: \"{message}\". "
-            f"In a full re-analysis, this would be incorporated as additional evidence "
-            f"to refine the prediction."
-        )
+        # Append hint evidence to session pipeline state
+        evidences = session.pipeline_state.get("evidences", [])
+        evidences.append(hint_evidence)
+        session.pipeline_state["evidences"] = evidences
+
+        # Re-run reasoning with augmented evidence
+        yield {"event": "chat_step", "step": "Re-analyzing with your hint..."}
+        try:
+            chain = EvidenceChain()
+            for e in evidences:
+                if isinstance(e, Evidence):
+                    chain.add(e)
+
+            updated = await self._reasoning_agent.reason_multi_candidate(chain)
+            if updated:
+                session.pipeline_state["ranked_candidates"] = updated
+                session.pipeline_state["prediction"] = updated[0]
+                yield {"event": "candidates_update", "candidates": updated}
+
+            answer = (
+                f"I've incorporated your hint: \"{message}\" and re-analyzed the evidence. "
+                f"The predictions have been updated."
+            )
+        except Exception as e:
+            logger.warning("Re-reasoning after hint failed: {}", e)
+            answer = (
+                f"Thanks for the hint! I've noted: \"{message}\" as additional evidence. "
+                f"Re-analysis encountered an issue but the hint is saved."
+            )
+
         session.add_message("assistant", answer, {"intent": "refine_hint"})
         yield {"event": "chat_message", "role": "assistant", "content": answer}
 

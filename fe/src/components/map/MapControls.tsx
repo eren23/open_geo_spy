@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import type { Map as LeafletMap } from 'leaflet';
-import type { CandidateResult } from '../../types';
+import type { CandidateResult, EvidenceItem } from '../../types';
 import EvidenceCard from '../evidence/EvidenceCard';
 import ConfidenceWaterfall from '../evidence/ConfidenceWaterfall';
 import ConfidenceBadge from '../evidence/ConfidenceBadge';
+import ProvenanceDashboard from '../evidence/ProvenanceDashboard';
 
 // ---------------------------------------------------------------------------
 // Rank badge color helpers (mirrors CandidateMarkers)
@@ -28,6 +29,7 @@ interface MapControlsProps {
   mapRef: React.RefObject<LeafletMap | null>;
   selectedCandidateRank: number;
   selectCandidate: (rank: number) => void;
+  pipelineEvidences?: EvidenceItem[];
 }
 
 export default function MapControls({
@@ -35,8 +37,10 @@ export default function MapControls({
   mapRef,
   selectedCandidateRank,
   selectCandidate,
+  pipelineEvidences,
 }: MapControlsProps) {
   const [detailExpanded, setDetailExpanded] = useState(true);
+  const [provenanceExpanded, setProvenanceExpanded] = useState(false);
 
   const validCandidates = candidates.filter(
     (c) => c.latitude != null && c.longitude != null,
@@ -45,6 +49,11 @@ export default function MapControls({
   if (validCandidates.length === 0) return null;
 
   const selected = validCandidates.find((c) => c.rank === selectedCandidateRank) ?? validCandidates[0];
+
+  // Use selected candidate's evidence trail, or fall back to full pipeline evidences
+  const provenanceEvidences = selected?.evidence_trail.length
+    ? selected.evidence_trail
+    : (pipelineEvidences ?? []);
 
   function zoomAndSelect(c: CandidateResult) {
     selectCandidate(c.rank);
@@ -183,6 +192,34 @@ export default function MapControls({
                 <ConfidenceWaterfall evidences={selected.evidence_trail} />
               )}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Provenance Dashboard — collapsible pipeline flow viz */}
+      {(provenanceEvidences.length > 0) && (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden mt-1">
+          <button
+            type="button"
+            onClick={() => setProvenanceExpanded((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 text-left bg-gray-50 border-b border-gray-200 hover:bg-gray-100 transition-colors"
+          >
+            <span className="text-xs font-semibold text-gray-700">
+              Evidence Provenance
+            </span>
+            <svg
+              className={`h-4 w-4 text-gray-400 transition-transform ${provenanceExpanded ? 'rotate-180' : ''}`}
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+            </svg>
+          </button>
+          {provenanceExpanded && (
+            <ProvenanceDashboard evidences={provenanceEvidences} />
           )}
         </div>
       )}

@@ -1,5 +1,6 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { Map as LeafletMap } from 'leaflet';
+import type { EvidenceItem } from './types';
 import { useSession } from './hooks/useSession';
 import Layout from './components/Layout';
 import UploadArea from './components/upload/UploadArea';
@@ -14,6 +15,7 @@ function App() {
     messages,
     loading,
     error,
+    evidenceSummary,
     selectedCandidateRank,
     selectCandidate,
     create,
@@ -26,6 +28,24 @@ function App() {
   const handleUpload = (file: File) => {
     create(file, locationHint || undefined);
   };
+
+  // Aggregate all unique evidence items across candidates for the provenance dashboard
+  const allEvidences = useMemo<EvidenceItem[]>(() => {
+    if (evidenceSummary?.top_evidence?.length) return evidenceSummary.top_evidence;
+    // Fallback: merge evidence from all candidates, dedup by content
+    const seen = new Set<string>();
+    const merged: EvidenceItem[] = [];
+    for (const c of candidates) {
+      for (const ev of c.evidence_trail) {
+        const key = `${ev.source}:${ev.content}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(ev);
+        }
+      }
+    }
+    return merged;
+  }, [candidates, evidenceSummary]);
 
   const hasSession = !!sessionId;
   // Show chat view as soon as processing starts (loading after upload)
@@ -87,6 +107,7 @@ function App() {
             mapRef={mapRef}
             selectedCandidateRank={selectedCandidateRank}
             selectCandidate={selectCandidate}
+            pipelineEvidences={allEvidences}
           />
         </div>
       )}

@@ -222,9 +222,27 @@ def _register_routes(app: FastAPI):
         async def event_generator() -> AsyncGenerator[dict, None]:
             try:
                 orchestrator: GeoLocatorOrchestrator = app.state.orchestrator
+                session_mgr = getattr(app.state, "session_manager", None)
                 async for event in orchestrator.locate_stream_v2(file_path, location_hint):
                     if event.get("event") == "result":
-                        event["data"] = _normalize_result_v2(event.get("data", {}))
+                        raw_data = event.get("data", {})
+
+                        # Create a session with the full pipeline result
+                        if session_mgr:
+                            sid = raw_data.get("session_id")
+                            session = session_mgr.create(
+                                image_path=file_path,
+                                pipeline_state={
+                                    "ranked_candidates": raw_data.get("candidates", []),
+                                    "prediction": raw_data,
+                                    "evidences": raw_data.get("evidence_trail", []),
+                                    "search_graph": raw_data.get("search_graph"),
+                                },
+                            )
+                            # Override session_id to match the one created by session_manager
+                            raw_data["session_id"] = session.id
+
+                        event["data"] = _normalize_result_v2(raw_data)
                     yield {"event": event.get("event", "progress"), "data": json.dumps(event)}
             except Exception as e:
                 logger.error("V2 stream failed: {}", e)
@@ -261,12 +279,20 @@ def _register_routes(app: FastAPI):
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        # Serialize search graph if present
+        sg = session.pipeline_state.get("search_graph")
+        search_graph_data = None
+        if sg and hasattr(sg, "to_dict"):
+            search_graph_data = sg.to_dict()
+        elif isinstance(sg, dict):
+            search_graph_data = sg
+
         return SessionResponse(
             session_id=session.id,
             candidates=session.pipeline_state.get("ranked_candidates", []),
             evidence_count=len(session.pipeline_state.get("evidences", [])),
-            search_graph=None,
-            messages=[],
+            search_graph=search_graph_data,
+            messages=session.messages,
         )
 
     @app.get("/api/session/{session_id}/search-graph")

@@ -84,11 +84,30 @@ class StreetCLIPAdapter(GeoModel):
         self, image_path: str, context: Optional[dict[str, Any]] = None
     ) -> list[dict]:
         self._ensure_loaded()
-        return await asyncio.to_thread(self._predictor.predict_country, image_path, 5)
+        country_results = await asyncio.to_thread(self._predictor.predict_country, image_path, 5)
+
+        # Wire city prediction if candidate cities are available in context
+        if country_results and context and context.get("candidate_cities"):
+            top_country = country_results[0]["country"]
+            cities = context["candidate_cities"]
+            city_results = await asyncio.to_thread(
+                self._predictor.predict_city, image_path, top_country, cities
+            )
+            # Store city predictions alongside country results
+            for r in country_results:
+                r["_city_preds"] = city_results
+        return country_results
 
     def to_evidence(self, predictions: list[dict]) -> list[Evidence]:
         self._ensure_loaded()
-        return self._predictor.to_evidence(predictions)
+        # Extract city predictions if present
+        city_preds = None
+        if predictions and "_city_preds" in predictions[0]:
+            city_preds = predictions[0]["_city_preds"]
+            # Clean up transient key
+            for r in predictions:
+                r.pop("_city_preds", None)
+        return self._predictor.to_evidence(predictions, city_preds)
 
     @property
     def model_and_processor(self):

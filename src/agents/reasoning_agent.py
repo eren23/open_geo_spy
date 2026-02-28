@@ -140,20 +140,48 @@ class ReasoningAgent:
         # Apply environment-specific confidence adjustment
         prediction = self._adjust_for_environment(prediction, evidence_chain, env_type)
 
-        # Verification step (using fast model for speed)
+        # Full CoVe verification when visual verification is enabled;
+        # fall back to quick_verify on error or when disabled.
         try:
-            is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
-                prediction, evidence_chain
-            )
-            if not is_plausible:
-                logger.warning("Verification flagged prediction: {}", reason)
-                prediction["confidence"] = adjusted_conf
-                prediction["verification_warning"] = reason
+            if self.settings.ml.enable_visual_verification:
+                result = await self.verifier.verify(prediction, evidence_chain)
+                prediction["confidence"] = result.confidence
+                prediction["verified"] = result.verified
+                prediction["claims"] = [
+                    {
+                        "text": c.text,
+                        "status": c.status.value,
+                        "supporting": c.supporting_evidence,
+                        "contradicting": c.contradicting_evidence,
+                        "confidence": c.confidence,
+                    }
+                    for c in result.claims
+                ]
+                prediction["contradictions"] = result.contradictions
+                if not result.verified:
+                    logger.warning("Full verification flagged prediction: {}", result.reason)
+                    prediction["verification_warning"] = result.reason
             else:
+                # Fast-path verification
+                is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
+                    prediction, evidence_chain
+                )
                 prediction["confidence"] = adjusted_conf
-                prediction["verified"] = True
+                prediction["verified"] = is_plausible
+                if not is_plausible:
+                    prediction["verification_warning"] = reason
         except Exception as e:
-            logger.warning("Verification skipped: {}", e)
+            logger.warning("Full verification failed, falling back to quick_verify: {}", e)
+            try:
+                is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
+                    prediction, evidence_chain
+                )
+                prediction["confidence"] = adjusted_conf
+                prediction["verified"] = is_plausible
+                if not is_plausible:
+                    prediction["verification_warning"] = reason
+            except Exception as e2:
+                logger.warning("Quick verification also failed: {}", e2)
 
         # Add evidence trail to result
         prediction["evidence_trail"] = [e.to_dict() for e in evidence_chain.top_evidence(10)]
