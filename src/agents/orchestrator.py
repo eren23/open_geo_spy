@@ -1,30 +1,23 @@
-"""Orchestrator - LangGraph workflow with AoT task decomposition.
+"""Orchestrator - wraps the LangGraph pipeline.
 
-Decomposes geolocation into atomic subtasks running as a DAG:
-
-[EXIF + VLM + OCR] -> [Evidence Merge] -> [ML Ensemble]  -> [Reasoning]
-                                       -> [Web Intel]     -> [Verification]
-                                                          -> [Result]
-
-Independent nodes run in parallel via asyncio.gather().
-Each node produces typed Evidence with source tracking.
+Provides the same ``locate()`` and ``locate_stream()`` API as v0.1.0
+but delegates to the compiled LangGraph StateGraph internally.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator
 
 from loguru import logger
 
-from src.agents.candidate_verification_agent import CandidateVerificationAgent
-from src.agents.feature_agent import FeatureExtractionAgent
-from src.agents.ml_ensemble_agent import MLEnsembleAgent
-from src.agents.reasoning_agent import ReasoningAgent
-from src.agents.web_intel_agent import WebIntelAgent
+from src.agents.graph import build_pipeline_graph
+from src.agents.state import PipelineState
+from src.cache import CacheStore
 from src.config.settings import Settings, get_settings
 from src.evidence.chain import EvidenceChain
 
@@ -77,100 +70,80 @@ class PipelineProgress:
 
 
 class GeoLocatorOrchestrator:
-    """Main orchestrator for the geolocation pipeline.
+    """Main orchestrator wrapping the LangGraph pipeline.
 
-    Manages the DAG execution of all agents and produces the final result.
-    Supports SSE progress streaming via async generator.
+    Backward-compatible API: ``locate()`` and ``locate_stream()``.
     """
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, settings: Settings | None = None, cache: CacheStore | None = None):
         self.settings = settings or get_settings()
-        self.feature_agent = FeatureExtractionAgent(self.settings)
-        self.ml_agent = MLEnsembleAgent(self.settings)
-        self.web_agent = WebIntelAgent(self.settings)
-        self.candidate_agent = CandidateVerificationAgent(self.settings)
-        self.reasoning_agent = ReasoningAgent(self.settings)
+        self.cache = cache
+        self._graph = build_pipeline_graph(self.settings, cache=cache)
+
+    def _initial_state(
+        self,
+        image_path: str,
+        location_hint: str | None = None,
+        session_id: str | None = None,
+    ) -> PipelineState:
+        return {
+            "image_path": image_path,
+            "location_hint": location_hint,
+            "session_id": session_id or str(uuid.uuid4()),
+            "evidences": [],
+            "metadata": {},
+            "features": {},
+            "ocr_result": {},
+            "candidates": [],
+            "search_graph": None,
+            "prediction": {},
+            "ranked_candidates": [],
+            "iteration": 0,
+            "max_iterations": 2,
+            "weak_evidence_areas": [],
+            "should_refine": False,
+            "messages": [],
+            "step_results": [],
+            "errors": [],
+        }
 
     async def locate(
         self,
         image_path: str,
         location_hint: str | None = None,
     ) -> dict[str, Any]:
-        """Run the full geolocation pipeline.
+        """Run the full geolocation pipeline (blocking).
 
         Returns final result dict with location, confidence, evidence, reasoning.
         """
         start = time.monotonic()
-        evidence_chain = EvidenceChain()
-        progress = PipelineProgress()
+        state = self._initial_state(image_path, location_hint)
 
-        # --- Step 1: Feature Extraction (EXIF + VLM + OCR in parallel) ---
-        step = await self._run_step(
-            "feature_extraction",
-            self._extract_features,
-            image_path, location_hint,
-        )
-        progress.steps.append(step)
-        feature_chain = step.data.get("chain", EvidenceChain())
-        metadata = step.data.get("metadata", {})
-        features = step.data.get("features", {})
-        ocr_result = step.data.get("ocr_result", {})
-        evidence_chain.add_many(feature_chain.evidences)
+        # Run graph to completion
+        final_state = await self._graph.ainvoke(state)
 
-        # --- Step 2: ML Ensemble + Web Intel (parallel) ---
-        ml_step, web_step = await asyncio.gather(
-            self._run_step(
-                "ml_ensemble",
-                self._run_ml_ensemble,
-                image_path, feature_chain,
-            ),
-            self._run_step(
-                "web_intelligence",
-                self._run_web_intel,
-                evidence_chain, features, ocr_result,
-            ),
-        )
-        progress.steps.extend([ml_step, web_step])
-        ml_chain = ml_step.data.get("chain", EvidenceChain())
-        web_chain = web_step.data.get("chain", EvidenceChain())
-        evidence_chain.add_many(ml_chain.evidences)
-        evidence_chain.add_many(web_chain.evidences)
-
-        # Share StreetCLIP model with candidate agent to avoid reloading
-        model_pair = self.ml_agent.streetclip_model_and_processor
-        if model_pair:
-            self.candidate_agent._scorer.model = model_pair[0]
-            self.candidate_agent._scorer.processor = model_pair[1]
-
-        # --- Step 2.5: Candidate Visual Verification ---
-        if self.settings.ml.enable_visual_verification:
-            verify_step = await self._run_step(
-                "candidate_verification",
-                self._run_candidate_verification,
-                image_path, evidence_chain, features, ocr_result,
-            )
-            progress.steps.append(verify_step)
-            verify_chain = verify_step.data.get("chain", EvidenceChain())
-            evidence_chain.add_many(verify_chain.evidences)
-
-        # --- Step 3: Reasoning + Verification ---
-        reasoning_step = await self._run_step(
-            "reasoning",
-            self._run_reasoning,
-            evidence_chain, features,
-        )
-        progress.steps.append(reasoning_step)
-        prediction = reasoning_step.data.get("prediction", {})
-
-        # Finalize
         elapsed = (time.monotonic() - start) * 1000
+        prediction = final_state.get("prediction", {})
+
+        # Build progress from step_results
+        progress = PipelineProgress()
+        for sr in final_state.get("step_results", []):
+            progress.steps.append(
+                StepResult(
+                    name=sr.get("name", ""),
+                    status=StepStatus(sr.get("status", "completed")),
+                    duration_ms=sr.get("duration_ms", 0),
+                    evidence_count=sr.get("evidence_count", 0),
+                    error=sr.get("error"),
+                )
+            )
         progress.elapsed_ms = elapsed
-        progress.total_evidence = len(evidence_chain.evidences)
+        progress.total_evidence = len(final_state.get("evidences", []))
 
         result = {
             **prediction,
             "pipeline_progress": progress.to_dict(),
-            "total_evidence_count": len(evidence_chain.evidences),
+            "total_evidence_count": progress.total_evidence,
             "elapsed_ms": round(elapsed, 1),
         }
 
@@ -178,7 +151,7 @@ class GeoLocatorOrchestrator:
             "Pipeline complete: {} in {:.0f}ms with {} evidences (conf={:.2f})",
             prediction.get("name", "Unknown"),
             elapsed,
-            len(evidence_chain.evidences),
+            progress.total_evidence,
             prediction.get("confidence", 0),
         )
 
@@ -188,158 +161,126 @@ class GeoLocatorOrchestrator:
         self,
         image_path: str,
         location_hint: str | None = None,
+        session_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Run pipeline with SSE progress streaming.
 
         Yields progress events during execution:
-        {"event": "step_start", "step": "feature_extraction"}
-        {"event": "step_complete", "step": "feature_extraction", "duration_ms": 1234}
-        {"event": "result", "data": {...}}
+          {"event": "step_start",    "step": "feature_extraction"}
+          {"event": "step_complete", "step": "feature_extraction", "duration_ms": 1234}
+          {"event": "refinement",    "iteration": 1, "weak_areas": [...]}
+          {"event": "result",        "data": {...}}
         """
         start = time.monotonic()
-        evidence_chain = EvidenceChain()
+        sid = session_id or str(uuid.uuid4())
+        state = self._initial_state(image_path, location_hint, sid)
 
-        # Step 1: Feature Extraction
-        yield {"event": "step_start", "step": "feature_extraction"}
         try:
-            chain, metadata, features, ocr_result = await self.feature_agent.extract_with_raw(
-                image_path, location_hint
-            )
-            evidence_chain.add_many(chain.evidences)
+            # Use both "custom" and "values" stream modes to get SSE events
+            # AND final state in a single pass (no double invocation).
+            final_state = None
+            async for mode, chunk in self._graph.astream(
+                state,
+                stream_mode=["custom", "values"],
+            ):
+                if mode == "custom":
+                    if isinstance(chunk, dict) and "event" in chunk:
+                        yield chunk
+                elif mode == "values":
+                    # Each values chunk is a full state snapshot;
+                    # keep the latest one as the final state.
+                    final_state = chunk
+
+            if final_state is None:
+                raise RuntimeError("Pipeline produced no final state")
+
+            elapsed = (time.monotonic() - start) * 1000
+            prediction = final_state.get("prediction", {})
+
             yield {
-                "event": "step_complete",
-                "step": "feature_extraction",
-                "duration_ms": round((time.monotonic() - start) * 1000),
-                "evidence_count": len(chain.evidences),
+                "event": "result",
+                "data": {
+                    **prediction,
+                    "session_id": sid,
+                    "total_evidence_count": len(final_state.get("evidences", [])),
+                    "elapsed_ms": round(elapsed, 1),
+                },
             }
+
         except Exception as e:
-            yield {"event": "step_error", "step": "feature_extraction", "error": str(e)}
-            chain, metadata, features, ocr_result = EvidenceChain(), {}, {}, {}
+            logger.error("Stream pipeline failed: {}", e)
+            yield {"event": "error", "error": str(e)}
 
-        # Step 2: ML + Web (parallel)
-        yield {"event": "step_start", "step": "ml_ensemble"}
-        yield {"event": "step_start", "step": "web_intelligence"}
-
-        ml_task = self._run_ml_ensemble(image_path, chain)
-        web_task = self._run_web_intel(evidence_chain, features, ocr_result)
-        ml_result, web_result = await asyncio.gather(ml_task, web_task, return_exceptions=True)
-
-        if isinstance(ml_result, dict):
-            ml_chain = ml_result.get("chain", EvidenceChain())
-            evidence_chain.add_many(ml_chain.evidences)
-            yield {"event": "step_complete", "step": "ml_ensemble", "evidence_count": len(ml_chain.evidences)}
-        else:
-            yield {"event": "step_error", "step": "ml_ensemble", "error": str(ml_result)}
-
-        if isinstance(web_result, dict):
-            web_chain = web_result.get("chain", EvidenceChain())
-            evidence_chain.add_many(web_chain.evidences)
-            yield {"event": "step_complete", "step": "web_intelligence", "evidence_count": len(web_chain.evidences)}
-        else:
-            yield {"event": "step_error", "step": "web_intelligence", "error": str(web_result)}
-
-        # Step 2.5: Candidate Visual Verification
-        if self.settings.ml.enable_visual_verification:
-            # Share StreetCLIP model
-            model_pair = self.ml_agent.streetclip_model_and_processor
-            if model_pair:
-                self.candidate_agent._scorer.model = model_pair[0]
-                self.candidate_agent._scorer.processor = model_pair[1]
-
-            yield {"event": "step_start", "step": "candidate_verification"}
-            try:
-                verify_chain = await self.candidate_agent.verify_candidates(
-                    image_path, evidence_chain, features, ocr_result
-                )
-                evidence_chain.add_many(verify_chain.evidences)
-                yield {
-                    "event": "step_complete",
-                    "step": "candidate_verification",
-                    "evidence_count": len(verify_chain.evidences),
-                }
-            except Exception as e:
-                yield {"event": "step_error", "step": "candidate_verification", "error": str(e)}
-
-        # Step 3: Reasoning
-        yield {"event": "step_start", "step": "reasoning"}
-        try:
-            prediction = await self.reasoning_agent.reason(evidence_chain, features)
-            yield {"event": "step_complete", "step": "reasoning"}
-        except Exception as e:
-            yield {"event": "step_error", "step": "reasoning", "error": str(e)}
-            prediction = {"name": "Unknown", "lat": 0, "lon": 0, "confidence": 0, "reasoning": str(e)}
-
-        elapsed = (time.monotonic() - start) * 1000
-        yield {
-            "event": "result",
-            "data": {
-                **prediction,
-                "total_evidence_count": len(evidence_chain.evidences),
-                "elapsed_ms": round(elapsed, 1),
-            },
-        }
-
-    # --- Private step runners ---
-
-    async def _run_step(
+    async def locate_stream_v2(
         self,
-        name: str,
-        func: Callable,
-        *args,
-    ) -> StepResult:
-        """Run a pipeline step with timing and error handling."""
+        image_path: str,
+        location_hint: str | None = None,
+        session_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """V2 streaming: produces multi-candidate results + search graph.
+
+        Same SSE events as ``locate_stream()`` plus:
+          {"event": "result", "data": {candidates: [...], search_graph: {...}, ...}}
+        """
         start = time.monotonic()
+        sid = session_id or str(uuid.uuid4())
+        state = self._initial_state(image_path, location_hint, sid)
+
         try:
-            result_data = await func(*args)
-            duration = (time.monotonic() - start) * 1000
-            evidence_count = 0
-            if isinstance(result_data, dict) and "chain" in result_data:
-                evidence_count = len(result_data["chain"].evidences)
-            logger.info("Step '{}' completed in {:.0f}ms ({} evidences)", name, duration, evidence_count)
-            return StepResult(
-                name=name,
-                status=StepStatus.COMPLETED,
-                duration_ms=round(duration, 1),
-                evidence_count=evidence_count,
-                data=result_data,
-            )
+            final_state = None
+            async for mode, chunk in self._graph.astream(
+                state,
+                stream_mode=["custom", "values"],
+            ):
+                if mode == "custom":
+                    if isinstance(chunk, dict) and "event" in chunk:
+                        yield chunk
+                elif mode == "values":
+                    final_state = chunk
+
+            if final_state is None:
+                raise RuntimeError("Pipeline produced no final state")
+
+            elapsed = (time.monotonic() - start) * 1000
+            prediction = final_state.get("prediction", {})
+            ranked = final_state.get("ranked_candidates", [])
+
+            # If the pipeline produced ranked candidates, use them.
+            # Otherwise, wrap the single prediction as the sole candidate.
+            if not ranked and prediction:
+                ranked = [{
+                    **prediction,
+                    "rank": 1,
+                    "latitude": prediction.get("lat"),
+                    "longitude": prediction.get("lon"),
+                    "evidence_trail": prediction.get("evidence_trail", []),
+                    "source_diversity": len({
+                        e.get("source", "") for e in prediction.get("evidence_trail", [])
+                        if isinstance(e, dict)
+                    }),
+                }]
+
+            yield {
+                "event": "result",
+                "data": {
+                    **prediction,
+                    "candidates": ranked,
+                    "session_id": sid,
+                    "search_graph": (
+                        final_state.get("search_graph").to_dict()
+                        if final_state.get("search_graph")
+                        and hasattr(final_state["search_graph"], "to_dict")
+                        else None
+                    ),
+                    "total_evidence_count": len(final_state.get("evidences", [])),
+                    "elapsed_ms": round(elapsed, 1),
+                },
+            }
+
         except Exception as e:
-            duration = (time.monotonic() - start) * 1000
-            logger.error("Step '{}' failed after {:.0f}ms: {}", name, duration, e)
-            return StepResult(
-                name=name,
-                status=StepStatus.FAILED,
-                duration_ms=round(duration, 1),
-                error=str(e),
-            )
-
-    async def _extract_features(self, image_path: str, location_hint: str | None) -> dict:
-        chain, metadata, features, ocr_result = await self.feature_agent.extract_with_raw(
-            image_path, location_hint
-        )
-        return {"chain": chain, "metadata": metadata, "features": features, "ocr_result": ocr_result}
-
-    async def _run_ml_ensemble(self, image_path: str, feature_chain: EvidenceChain) -> dict:
-        chain = await self.ml_agent.predict(image_path, feature_chain)
-        return {"chain": chain}
-
-    async def _run_web_intel(self, evidence_chain: EvidenceChain, features: dict, ocr_result: dict) -> dict:
-        chain = await self.web_agent.search(evidence_chain, features, ocr_result)
-        return {"chain": chain}
-
-    async def _run_candidate_verification(
-        self, image_path: str, evidence_chain: EvidenceChain, features: dict, ocr_result: dict
-    ) -> dict:
-        chain = await self.candidate_agent.verify_candidates(
-            image_path, evidence_chain, features, ocr_result
-        )
-        return {"chain": chain}
-
-    async def _run_reasoning(self, evidence_chain: EvidenceChain, features: dict) -> dict:
-        prediction = await self.reasoning_agent.reason(evidence_chain, features)
-        return {"prediction": prediction}
+            logger.error("V2 stream pipeline failed: {}", e)
+            yield {"event": "error", "error": str(e)}
 
     async def close(self):
-        """Clean up all agent resources."""
-        await self.web_agent.close()
-        await self.candidate_agent.close()
+        """Clean up resources."""
+        pass

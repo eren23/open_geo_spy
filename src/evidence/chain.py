@@ -49,6 +49,8 @@ class Evidence:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     content_hash: str = ""
     metadata: dict = field(default_factory=dict)
+    provenance: list[str] = field(default_factory=list)  # Agent/step path
+    derived_from: list[str] = field(default_factory=list)  # Parent evidence hashes
 
     def __post_init__(self):
         if not self.content_hash:

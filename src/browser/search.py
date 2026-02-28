@@ -7,20 +7,24 @@ URL scraping with stealth browser automation.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Optional
 
 from loguru import logger
 
 from src.browser.browser_pool import BrowserPool
+from src.cache.decorators import cached
+from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
 
 
 class BrowserSearch:
     """Stealth browser-based search operations (Tier 2)."""
 
-    def __init__(self, pool: BrowserPool):
+    def __init__(self, pool: BrowserPool, cache: Optional[CacheStore] = None):
         self.pool = pool
+        self._cache = cache
 
+    @cached("browser", 1800)
     async def search_google_maps(self, query: str) -> list[dict[str, Any]]:
         """Search Google Maps with stealth browser.
 

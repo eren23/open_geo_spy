@@ -90,12 +90,67 @@ export function locateImageStream(
     formData.append('location_hint', locationHint);
   }
 
+  return streamSSE(`${API_URL}/api/locate/stream`, formData, onEvent, onDone, onError);
+}
+
+export function locateImageStreamV2(
+  file: File,
+  locationHint: string | undefined,
+  onEvent: (event: SSEEvent) => void,
+  onDone: () => void,
+  onError: (error: Error) => void,
+): () => void {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (locationHint) {
+    formData.append('location_hint', locationHint);
+  }
+
+  return streamSSE(`${API_URL}/api/v2/locate/stream`, formData, onEvent, onDone, onError);
+}
+
+export function chatStream(
+  sessionId: string,
+  message: string,
+  onEvent: (event: SSEEvent) => void,
+  onDone: () => void,
+  onError: (error: Error) => void,
+): () => void {
+  return streamSSE(
+    `${API_URL}/api/chat/${sessionId}`,
+    JSON.stringify({ message }),
+    onEvent,
+    onDone,
+    onError,
+    { 'Content-Type': 'application/json' },
+  );
+}
+
+export async function getSession(sessionId: string): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${API_URL}/api/session/${sessionId}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+// --- Internal SSE helper ---
+
+function streamSSE(
+  url: string,
+  body: FormData | string,
+  onEvent: (event: SSEEvent) => void,
+  onDone: () => void,
+  onError: (error: Error) => void,
+  extraHeaders?: Record<string, string>,
+): () => void {
   const abortController = new AbortController();
 
-  fetch(`${API_URL}/api/locate/stream`, {
+  const headers: Record<string, string> = { ...extraHeaders };
+
+  fetch(url, {
     method: 'POST',
-    body: formData,
+    body,
     signal: abortController.signal,
+    headers: body instanceof FormData ? headers : { ...headers, 'Content-Type': 'application/json' },
   })
     .then(async (response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

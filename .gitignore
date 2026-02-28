@@ -1,3 +1,26 @@
 .env
 data/*
 images/*
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+*.png
+.playwright-mcp

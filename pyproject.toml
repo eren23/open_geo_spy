@@ -58,6 +58,9 @@ dependencies = [
 
     # Data
     "orjson>=3.9.0",
+
+    # Calibration
+    "scikit-learn>=1.4.0",
 ]
 
 [project.optional-dependencies]

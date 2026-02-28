@@ -167,6 +167,126 @@ class ReasoningAgent:
 
         return prediction
 
+    async def reason_multi_candidate(
+        self,
+        evidence_chain: EvidenceChain,
+        features: dict[str, Any] | None = None,
+        max_candidates: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Produce top-N ranked candidate locations.
+
+        1. Cluster evidence by geographic proximity (haversine, eps=50km)
+        2. For each cluster, synthesize a candidate via LLM
+        3. Rank by composite score
+        """
+        from src.utils.geo_math import haversine_distance
+
+        # Get single prediction as primary
+        primary = await self.reason(evidence_chain, features)
+        candidates = [primary]
+
+        # Cluster geo evidences
+        geo = evidence_chain.geo_evidences
+        if len(geo) < 2:
+            return self._rank_candidates(candidates)
+
+        clusters = self._cluster_by_proximity(geo, eps_km=50)
+
+        # For each cluster (beyond the primary), create a candidate
+        for cluster_evidences in clusters[1:max_candidates]:
+            if not cluster_evidences:
+                continue
+
+            cluster_chain = EvidenceChain()
+            cluster_chain.add_many(cluster_evidences)
+            centroid = cluster_chain.location_cluster()
+
+            # Build candidate from cluster centroid + evidence
+            countries = cluster_chain.country_predictions
+            top_country = max(set(countries), key=countries.count) if countries else None
+
+            candidate = {
+                "name": top_country or "Unknown location",
+                "country": top_country,
+                "region": None,
+                "city": None,
+                "lat": centroid[0] if centroid else None,
+                "lon": centroid[1] if centroid else None,
+                "confidence": cluster_chain.agreement_score() * 0.8,
+                "reasoning": f"Evidence cluster with {len(cluster_evidences)} data points",
+                "evidence_used": [e.content[:80] for e in cluster_evidences[:5]],
+                "evidence_trail": [e.to_dict() for e in cluster_evidences[:5]],
+                "evidence_summary": cluster_chain.summary(),
+            }
+            candidates.append(candidate)
+
+        return self._rank_candidates(candidates)
+
+    def _cluster_by_proximity(
+        self,
+        evidences: list[Evidence],
+        eps_km: float = 50,
+    ) -> list[list[Evidence]]:
+        """Simple iterative clustering by haversine distance."""
+        from src.utils.geo_math import haversine_distance
+
+        clusters: list[list[Evidence]] = []
+        assigned = [False] * len(evidences)
+
+        for i, e in enumerate(evidences):
+            if assigned[i]:
+                continue
+            cluster = [e]
+            assigned[i] = True
+
+            for j in range(i + 1, len(evidences)):
+                if assigned[j]:
+                    continue
+                dist = haversine_distance(
+                    e.latitude, e.longitude,
+                    evidences[j].latitude, evidences[j].longitude,
+                )
+                if dist < eps_km:
+                    cluster.append(evidences[j])
+                    assigned[j] = True
+
+            clusters.append(cluster)
+
+        # Sort clusters by size descending
+        clusters.sort(key=len, reverse=True)
+        return clusters
+
+    def _rank_candidates(self, candidates: list[dict]) -> list[dict]:
+        """Rank candidates by composite score."""
+        for i, c in enumerate(candidates):
+            evidence_count = len(c.get("evidence_trail", []))
+            source_set = set()
+            for e in c.get("evidence_trail", []):
+                if isinstance(e, dict):
+                    source_set.add(e.get("source", ""))
+
+            evidence_agreement = c.get("confidence", 0)
+            visual_match = c.get("visual_match_score", 0) or 0
+            source_diversity = len(source_set) / 5  # normalize to ~1
+            raw_conf = c.get("confidence", 0)
+
+            score = (
+                0.4 * evidence_agreement
+                + 0.3 * visual_match
+                + 0.2 * min(source_diversity, 1.0)
+                + 0.1 * raw_conf
+            )
+            c["_score"] = score
+            c["source_diversity"] = len(source_set)
+
+        candidates.sort(key=lambda x: x.get("_score", 0), reverse=True)
+
+        for i, c in enumerate(candidates):
+            c["rank"] = i + 1
+            c.pop("_score", None)
+
+        return candidates
+
     def _adjust_for_environment(
         self,
         prediction: dict,

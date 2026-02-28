@@ -15,6 +15,7 @@ from typing import Any
 
 from loguru import logger
 
+from src.cache import CacheStore
 from src.config.settings import Settings
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.geo.geocoding import reverse_geocode
@@ -25,10 +26,11 @@ from src.utils.geo_math import validate_coordinates
 class WebIntelAgent:
     """Tiered web search and verification agent."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, cache: CacheStore | None = None):
         self.settings = settings
+        self._cache = cache
         self._serper = None
-        self._osm = OSMClient()
+        self._osm = OSMClient(cache=cache)
         self._browser_pool = None
         self._browser_search = None
 
@@ -36,7 +38,7 @@ class WebIntelAgent:
     def serper(self):
         if self._serper is None and self.settings.geo.serper_api_key:
             from src.geo.serper_client import SerperClient
-            self._serper = SerperClient(self.settings.geo.serper_api_key)
+            self._serper = SerperClient(self.settings.geo.serper_api_key, cache=self._cache)
         return self._serper
 
     async def search(
@@ -44,6 +46,7 @@ class WebIntelAgent:
         evidence_chain: EvidenceChain,
         features: dict[str, Any] | None = None,
         ocr_result: dict[str, list[str]] | None = None,
+        weak_areas: list[str] | None = None,
     ) -> EvidenceChain:
         """Run tiered search based on available evidence.
 
@@ -51,6 +54,7 @@ class WebIntelAgent:
             evidence_chain: Evidence from feature extraction and ML models
             features: Raw visual features dict
             ocr_result: Raw OCR results dict
+            weak_areas: Weakness areas from refinement check (triggers targeted queries)
         """
         chain = EvidenceChain()
 
@@ -203,7 +207,7 @@ class WebIntelAgent:
 
             if self._browser_search is None:
                 from src.browser.search import BrowserSearch
-                self._browser_search = BrowserSearch(self._browser_pool)
+                self._browser_search = BrowserSearch(self._browser_pool, cache=self._cache)
 
             all_evidences = []
             for query in queries:

@@ -73,6 +73,9 @@ class GeoSettings(BaseModel):
     geonames_username: str = ""
     serper_api_key: str = ""
     mapillary_access_token: str = ""
+    brave_api_key: str = ""
+    searxng_url: str = ""
+    search_providers: list[str] = ["serper"]  # Options: serper, brave, searxng
 
 
 class MLSettings(BaseModel):
@@ -84,6 +87,36 @@ class MLSettings(BaseModel):
     enable_visual_verification: bool = True
     device: str = "cpu"  # "cpu", "cuda", "mps"
     cache_dir: str = os.path.expanduser("~/.cache/open_geo_spy/models")
+
+    # Per-model weights for ensemble scoring
+    model_weights: dict[str, float] = {
+        "GeoCLIP": 1.0,
+        "StreetCLIP": 1.0,
+        "VLM Geo": 1.5,
+    }
+
+
+class CacheSettings(BaseModel):
+    """Caching configuration."""
+
+    enabled: bool = True
+    backend: str = "memory"  # "memory" or "disk"
+    disk_path: str = os.path.expanduser("~/.cache/open_geo_spy/api_cache")
+    max_memory_entries: int = 1000
+
+    # TTLs per source (seconds)
+    serper_ttl: int = 7200  # 2 hours
+    osm_ttl: int = 86400  # 24 hours
+    browser_ttl: int = 1800  # 30 minutes
+    brave_ttl: int = 7200
+    searxng_ttl: int = 3600
+
+
+class CalibrationSettings(BaseModel):
+    """Confidence calibration configuration."""
+
+    enabled: bool = False
+    data_path: str = os.path.expanduser("~/.cache/open_geo_spy/calibration.json")
 
 
 class APISettings(BaseModel):
@@ -122,6 +155,8 @@ class Settings(BaseSettings):
     geo: GeoSettings = GeoSettings()
     ml: MLSettings = MLSettings()
     api: APISettings = APISettings()
+    cache: CacheSettings = CacheSettings()
+    calibration: CalibrationSettings = CalibrationSettings()
 
     model_config = {
         "env_prefix": "",

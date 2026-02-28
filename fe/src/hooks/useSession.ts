@@ -1,0 +1,323 @@
+import { useCallback, useRef, useState } from 'react';
+import type { SSEEvent } from '../api';
+import type { CandidateResult, ChatMessage } from '../types';
+import { useChatMessages } from './useChatMessages';
+
+const API_URL = import.meta.env.VITE_API_URL || '';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface UseSessionReturn {
+  /** The current session ID (null until the first stream starts). */
+  sessionId: string | null;
+  /** Ranked candidate results from the V2 pipeline. */
+  candidates: CandidateResult[];
+  /** Full chat message history (user + assistant + system/step). */
+  messages: ChatMessage[];
+  /** True while any stream (locate or chat) is active. */
+  loading: boolean;
+  /** Latest error, if any. */
+  error: Error | null;
+  /**
+   * Start a new locate session.
+   * Streams from `/api/v2/locate/stream` and populates candidates + messages.
+   */
+  create: (file: File, locationHint?: string) => void;
+  /**
+   * Send a follow-up chat message in the current session.
+   * Streams from `/api/chat/{session_id}`.
+   */
+  sendMessage: (text: string) => void;
+  /** Abort any in-flight stream. */
+  cancel: () => void;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Opens a POST fetch to `url` with `body`, reads the SSE stream line-by-line,
+ * and calls `onEvent` for each parsed JSON payload.
+ * Returns a cleanup function that aborts the request.
+ */
+function streamSSE(
+  url: string,
+  body: FormData | string,
+  onEvent: (event: Record<string, unknown>) => void,
+  onDone: () => void,
+  onError: (err: Error) => void,
+): () => void {
+  const controller = new AbortController();
+
+  const headers: Record<string, string> = {};
+  const isJSON = typeof body === 'string';
+  if (isJSON) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  fetch(`${API_URL}${url}`, {
+    method: 'POST',
+    headers,
+    body,
+    signal: controller.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(errBody.detail || `HTTP ${response.status}`);
+      }
+      if (!response.body) throw new Error('No response body');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6));
+              onEvent(parsed);
+            } catch {
+              // Skip malformed lines
+            }
+          }
+        }
+      }
+
+      onDone();
+    })
+    .catch((err) => {
+      if (err.name !== 'AbortError') {
+        onError(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+
+  return () => controller.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
+/**
+ * Session state management for the OpenGeoSpy chat UI.
+ *
+ * - `create(file, hint?)` streams the V2 locate pipeline and populates
+ *   candidates and chat messages (including step progress).
+ * - `sendMessage(text)` streams a follow-up chat request against the
+ *   existing session.
+ */
+export function useSession(): UseSessionReturn {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<CandidateResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const { messages, addMessage, addAgentStep, clear: clearMessages } = useChatMessages();
+  const cancelRef = useRef<(() => void) | null>(null);
+
+  // ---- create ----------------------------------------------------------
+
+  const create = useCallback(
+    (file: File, locationHint?: string) => {
+      // Abort any existing stream
+      cancelRef.current?.();
+
+      // Reset state
+      setCandidates([]);
+      setError(null);
+      setSessionId(null);
+      clearMessages();
+      setLoading(true);
+
+      // Add an initial message so the chat view appears immediately
+      addAgentStep('pipeline', 'running', 'Analyzing image...');
+
+      // Build form data
+      const formData = new FormData();
+      formData.append('file', file);
+      if (locationHint) {
+        formData.append('location_hint', locationHint);
+      }
+
+      const cancel = streamSSE(
+        '/api/v2/locate/stream',
+        formData,
+        (event) => {
+          const ev = event as unknown as SSEEvent & {
+            data?: Record<string, unknown>;
+            candidates?: CandidateResult[];
+            session_id?: string;
+          };
+
+          switch (ev.event) {
+            case 'step_start':
+              if (ev.step) addAgentStep(ev.step, 'running');
+              break;
+
+            case 'step_complete':
+              if (ev.step) {
+                const detail = ev.evidence_count != null
+                  ? `${ev.evidence_count} evidence in ${ev.duration_ms ?? 0}ms`
+                  : undefined;
+                addAgentStep(ev.step, 'completed', detail);
+              }
+              break;
+
+            case 'step_error':
+              if (ev.step) addAgentStep(ev.step, 'error', ev.error);
+              break;
+
+            case 'result': {
+              const data = ev.data ?? (ev as unknown as Record<string, unknown>);
+              const resultCandidates = (data.candidates ?? []) as CandidateResult[];
+              const sid = (data.session_id ?? null) as string | null;
+
+              setCandidates(resultCandidates);
+              if (sid) setSessionId(sid);
+
+              // Produce a summary assistant message
+              if (resultCandidates.length > 0) {
+                const top = resultCandidates[0];
+                addMessage({
+                  role: 'assistant',
+                  content: `I identified **${top.name}** (confidence ${(top.confidence * 100).toFixed(0)}%). ${top.reasoning}`,
+                  timestamp: new Date().toISOString(),
+                  metadata: { candidates: resultCandidates.length },
+                });
+              }
+              break;
+            }
+
+            case 'error':
+              setError(new Error(ev.error || 'Unknown pipeline error'));
+              break;
+          }
+        },
+        () => setLoading(false),
+        (err) => {
+          setError(err);
+          setLoading(false);
+        },
+      );
+
+      cancelRef.current = cancel;
+    },
+    [addAgentStep, addMessage, clearMessages],
+  );
+
+  // ---- sendMessage -----------------------------------------------------
+
+  const sendMessage = useCallback(
+    (text: string) => {
+      if (!sessionId) {
+        setError(new Error('No active session'));
+        return;
+      }
+
+      // Abort any in-flight stream
+      cancelRef.current?.();
+
+      // Append user message
+      addMessage({
+        role: 'user',
+        content: text,
+        timestamp: new Date().toISOString(),
+      });
+
+      setError(null);
+      setLoading(true);
+
+      let assistantBuffer = '';
+
+      const cancel = streamSSE(
+        `/api/chat/${sessionId}`,
+        JSON.stringify({ message: text }),
+        (event) => {
+          const ev = event as Record<string, unknown>;
+
+          switch (ev.event) {
+            case 'chat_token':
+              // Streaming token
+              assistantBuffer += (ev.token as string) || '';
+              break;
+
+            case 'chat_message':
+              // Complete assistant message
+              addMessage({
+                role: 'assistant',
+                content: (ev.content as string) || assistantBuffer,
+                timestamp: new Date().toISOString(),
+                metadata: ev.metadata as Record<string, unknown> | undefined,
+              });
+              assistantBuffer = '';
+              break;
+
+            case 'candidates_update':
+              // The chat handler may return updated candidates
+              if (Array.isArray(ev.candidates)) {
+                setCandidates(ev.candidates as CandidateResult[]);
+              }
+              break;
+
+            case 'error':
+              setError(new Error((ev.error as string) || 'Chat error'));
+              break;
+          }
+        },
+        () => {
+          // If we accumulated tokens but never got a chat_message event,
+          // flush the buffer as the assistant response.
+          if (assistantBuffer) {
+            addMessage({
+              role: 'assistant',
+              content: assistantBuffer,
+              timestamp: new Date().toISOString(),
+            });
+            assistantBuffer = '';
+          }
+          setLoading(false);
+        },
+        (err) => {
+          setError(err);
+          setLoading(false);
+        },
+      );
+
+      cancelRef.current = cancel;
+    },
+    [sessionId, addMessage],
+  );
+
+  // ---- cancel ----------------------------------------------------------
+
+  const cancel = useCallback(() => {
+    cancelRef.current?.();
+    cancelRef.current = null;
+    setLoading(false);
+  }, []);
+
+  return {
+    sessionId,
+    candidates,
+    messages,
+    loading,
+    error,
+    create,
+    sendMessage,
+    cancel,
+  };
+}
+
+export default useSession;
