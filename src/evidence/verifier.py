@@ -7,6 +7,7 @@ and detects hallucinations.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -15,6 +16,7 @@ from loguru import logger
 from openai import AsyncOpenAI
 
 from src.evidence.chain import Evidence, EvidenceChain
+from src.scoring.scorer import GeoScorer
 
 
 class VerificationStatus(str, Enum):
@@ -77,9 +79,10 @@ class LocationVerifier:
     5. Calculate final verification result
     """
 
-    def __init__(self, client: AsyncOpenAI, model: str):
+    def __init__(self, client: AsyncOpenAI, model: str, scorer: GeoScorer | None = None):
         self.client = client
         self.model = model
+        self.scorer = scorer or GeoScorer()
 
     async def verify(
         self,
@@ -100,12 +103,15 @@ class LocationVerifier:
                     verified=False, confidence=0.0, reason="Could not decompose prediction into verifiable claims"
                 )
 
-            # Step 2-3: Verify each claim against evidence
+            # Steps 2-4: Verify claims and detect contradictions
             evidence_context = evidence_chain.to_prompt_context()
             verified_claims = await self._verify_claims(claims, evidence_context)
 
-            # Step 4: Detect contradictions
-            contradictions = self._detect_contradictions(verified_claims, evidence_chain)
+            # Skip contradiction detection with too few claims
+            if len(verified_claims) < 2:
+                contradictions = []
+            else:
+                contradictions = self._detect_contradictions(verified_claims, evidence_chain)
 
             # Step 5: Aggregate
             return self._calculate_result(prediction, verified_claims, contradictions)
@@ -146,12 +152,13 @@ Is this prediction supported by the evidence? Consider:
             )
             answer = resp.choices[0].message.content.strip()
 
+            conf = prediction.get("confidence", 0.5)
             if answer.startswith("SUPPORTED"):
-                return True, min(1.0, prediction.get("confidence", 0.5) * 1.1), answer
+                return True, self.scorer.verification_supported(conf), answer
             elif answer.startswith("CONTRADICTED"):
-                return False, prediction.get("confidence", 0.5) * 0.5, answer
+                return False, self.scorer.verification_contradicted(conf), answer
             else:
-                return True, prediction.get("confidence", 0.5) * 0.9, answer
+                return True, self.scorer.verification_uncertain(conf), answer
 
         except Exception as e:
             logger.warning("Quick verify failed: {}", str(e))
@@ -294,15 +301,15 @@ CONFIDENCE: [0.0-1.0]
         # Determine overall verification
         if contradicted_count > total / 2:
             verified = False
-            confidence = max(0.1, prediction.get("confidence", 0.5) * 0.3)
+            confidence = self.scorer.verification_majority_contradicted(prediction.get("confidence", 0.5))
             reason = f"{contradicted_count}/{total} claims contradicted"
         elif verified_count > total / 2:
             verified = True
-            confidence = min(1.0, avg_claim_confidence * 1.1)
+            confidence = self.scorer.verification_majority_verified(avg_claim_confidence)
             reason = f"{verified_count}/{total} claims verified"
         else:
             verified = True
-            confidence = avg_claim_confidence * 0.8
+            confidence = self.scorer.verification_partial(avg_claim_confidence)
             reason = f"{verified_count} verified, {partial_count} partial, {contradicted_count} contradicted out of {total}"
 
         # Generate suggested corrections from contradictions

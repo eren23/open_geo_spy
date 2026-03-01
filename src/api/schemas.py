@@ -62,9 +62,94 @@ class LocateResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class GroundingInfo(BaseModel):
+    """Per-level grounding verdict from the HierarchicalResolver."""
+
+    level: str
+    value: Optional[str] = None
+    verdict: str = "uncertain"
+    confidence: float = 0.0
+    supporting_count: int = 0
+    contradicting_count: int = 0
+    source_count: int = 0
+    explanation: str = ""
+
+
+class CandidateResult(BaseModel):
+    """A ranked location candidate."""
+
+    rank: int
+    name: str
+    country: Optional[str] = None
+    region: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    confidence: float = 0.0
+    reasoning: str = ""
+    evidence_trail: list[EvidenceItem] = []
+    visual_match_score: Optional[float] = None
+    source_diversity: int = 0
+    resolved_level: Optional[str] = None
+    groundings: list[GroundingInfo] = []
+
+
+class LocateResponseV2(BaseModel):
+    """V2 response with multi-candidate ranking and search graph."""
+
+    # Primary prediction (same as v1 for backward compat)
+    name: str = "Unknown"
+    country: Optional[str] = None
+    region: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    confidence: float = 0.0
+    reasoning: str = ""
+    verified: bool = False
+    verification_warning: Optional[str] = None
+
+    # V2 additions
+    candidates: list[CandidateResult] = []
+    search_graph: Optional[dict[str, Any]] = None
+    session_id: Optional[str] = None
+
+    # Common
+    evidence_trail: list[EvidenceItem] = []
+    evidence_summary: dict[str, Any] = {}
+    pipeline_progress: dict[str, Any] = {}
+    total_evidence_count: int = 0
+    elapsed_ms: float = 0.0
+
+
+class ChatRequest(BaseModel):
+    """Request for chat follow-up."""
+
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatMessageSchema(BaseModel):
+    """A single chat message."""
+
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
+
+
+class SessionResponse(BaseModel):
+    """Response with session state."""
+
+    session_id: str
+    candidates: list[CandidateResult] = []
+    evidence_count: int = 0
+    search_graph: Optional[dict[str, Any]] = None
+    messages: list[ChatMessageSchema] = []
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "2.0.0"
+    version: str = "0.2.0"
     services: dict[str, bool] = {}
 
 
@@ -77,3 +162,13 @@ class SSEEvent(BaseModel):
     evidence_count: Optional[int] = None
     error: Optional[str] = None
     data: Optional[dict[str, Any]] = None
+
+    # Tracing-specific fields (v0.3.0)
+    model: Optional[str] = None
+    tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
+    source: Optional[str] = None
+    content_preview: Optional[str] = None
+    confidence: Optional[float] = None
+    level: Optional[str] = None
+    verdict: Optional[str] = None

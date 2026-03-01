@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
+from src.scoring.scorer import GeoScorer
 
 GEO_REASONING_PROMPT = """You are an expert geolocation analyst. Analyze this image and determine the most likely location.
 
@@ -87,8 +88,10 @@ async def predict_location(
         return _empty_prediction()
 
 
-def to_evidence(prediction: dict[str, Any]) -> list[Evidence]:
+def to_evidence(prediction: dict[str, Any], scorer: GeoScorer | None = None) -> list[Evidence]:
     """Convert VLM geo prediction to Evidence objects."""
+    if scorer is None:
+        scorer = GeoScorer()
     evidences = []
 
     lat = prediction.get("latitude")
@@ -120,7 +123,7 @@ def to_evidence(prediction: dict[str, Any]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.VLM_GEO,
                 content=f"VLM country prediction: {country}",
-                confidence=min(conf + 0.1, 1.0),  # Country-level is usually more confident
+                confidence=min(conf + scorer.vlm_country_boost, 1.0),
                 country=country,
                 metadata={"model": "vlm_geo", "type": "country"},
             )
@@ -133,7 +136,7 @@ def to_evidence(prediction: dict[str, Any]) -> list[Evidence]:
                 Evidence(
                     source=EvidenceSource.VLM_GEO,
                     content=f"VLM alternative country: {alt}",
-                    confidence=max(0.1, conf - 0.2),
+                    confidence=max(scorer.vlm_alternative_floor, conf - scorer.vlm_alternative_penalty),
                     country=alt,
                     metadata={"model": "vlm_geo", "type": "alternative_country"},
                 )

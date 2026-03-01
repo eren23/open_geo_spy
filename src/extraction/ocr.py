@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
+from src.scoring.scorer import GeoScorer
 
 OCR_PROMPT = """Extract ALL visible text from this image. Be thorough and include:
 
@@ -71,8 +72,10 @@ async def extract_text(
         return _empty_result()
 
 
-def to_evidence(ocr_result: dict[str, list[str]]) -> list[Evidence]:
+def to_evidence(ocr_result: dict[str, list[str]], scorer: GeoScorer | None = None) -> list[Evidence]:
     """Convert OCR results to Evidence objects."""
+    if scorer is None:
+        scorer = GeoScorer()
     evidences = []
 
     for plate in ocr_result.get("license_plates", []):
@@ -80,7 +83,7 @@ def to_evidence(ocr_result: dict[str, list[str]]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.OCR,
                 content=f"License plate: {plate}",
-                confidence=0.8,
+                confidence=scorer.source_conf("license_plate"),
                 metadata={"type": "license_plate"},
             )
         )
@@ -90,7 +93,7 @@ def to_evidence(ocr_result: dict[str, list[str]]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.OCR,
                 content=f"Street sign: {sign}",
-                confidence=0.75,
+                confidence=scorer.source_conf("street_sign"),
                 metadata={"type": "street_sign"},
             )
         )
@@ -100,7 +103,7 @@ def to_evidence(ocr_result: dict[str, list[str]]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.OCR,
                 content=f"Business: {business}",
-                confidence=0.7,
+                confidence=scorer.source_conf("business_name"),
                 metadata={"type": "business_name"},
             )
         )
@@ -111,7 +114,7 @@ def to_evidence(ocr_result: dict[str, list[str]]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.OCR,
                 content=f"Languages detected: {', '.join(languages)}",
-                confidence=0.6,
+                confidence=scorer.source_conf("language"),
                 metadata={"type": "language", "languages": languages},
             )
         )

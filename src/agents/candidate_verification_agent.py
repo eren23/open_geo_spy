@@ -14,16 +14,12 @@ from typing import Any
 
 from loguru import logger
 
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.geo.mapillary_client import MapillaryClient
 from src.geo.serper_client import SerperClient
 from src.models.visual_similarity import VisualSimilarityScorer
-
-# Max candidates to generate across all strategies
-MAX_CANDIDATES = 8
-# Max reference images to fetch per candidate
-MAX_REFS_PER_CANDIDATE = 5
+from src.scoring.scorer import GeoScorer
 
 
 class CandidateVerificationAgent:
@@ -34,8 +30,10 @@ class CandidateVerificationAgent:
         settings: Settings,
         streetclip_model: Any | None = None,
         streetclip_processor: Any | None = None,
+        scorer: GeoScorer | None = None,
     ):
         self.settings = settings
+        self.geo_scorer = scorer or GeoScorer(get_scoring_config())
         self._scorer = VisualSimilarityScorer(
             device=settings.ml.device,
             model=streetclip_model,
@@ -123,7 +121,7 @@ class CandidateVerificationAgent:
             key=lambda x: x[1]["similarity"],
             reverse=True,
         ):
-            confidence = _similarity_to_confidence(best["similarity"])
+            confidence = self.geo_scorer.similarity_to_confidence(best["similarity"])
             candidate_info = next(
                 (c for c in candidates if c["name"] == name), {}
             )
@@ -239,10 +237,10 @@ class CandidateVerificationAgent:
                         "city": e.city or top_city or None,
                     }
 
-            if len(candidates) >= MAX_CANDIDATES:
+            if len(candidates) >= self.geo_scorer.max_candidates:
                 break
 
-        return list(candidates.values())[:MAX_CANDIDATES]
+        return list(candidates.values())[:self.geo_scorer.max_candidates]
 
     async def _fetch_reference_images(
         self, candidates: list[dict]
@@ -275,7 +273,7 @@ class CandidateVerificationAgent:
         if self._serper:
             try:
                 images = await self._serper.search_images(
-                    candidate["query"], num_results=MAX_REFS_PER_CANDIDATE
+                    candidate["query"], num_results=self.geo_scorer.max_refs_per_candidate
                 )
                 for img in images:
                     url = img.get("imageUrl") or img.get("thumbnailUrl")
@@ -291,7 +289,7 @@ class CandidateVerificationAgent:
         if self._mapillary and candidate.get("lat") and candidate.get("lon"):
             try:
                 mapillary_imgs = await self._mapillary.search_nearby(
-                    candidate["lat"], candidate["lon"], radius_m=500, limit=2
+                    candidate["lat"], candidate["lon"], radius_m=self.geo_scorer.mapillary_radius_m, limit=2
                 )
                 for mimg in mapillary_imgs:
                     url = mimg.get("image_url") or mimg.get("thumb_url")
@@ -303,7 +301,7 @@ class CandidateVerificationAgent:
             except Exception as e:
                 logger.debug("Mapillary search failed for '{}': {}", candidate["name"], e)
 
-        return refs[:MAX_REFS_PER_CANDIDATE]
+        return refs[:self.geo_scorer.max_refs_per_candidate]
 
     async def close(self):
         """Clean up resources."""
@@ -311,20 +309,6 @@ class CandidateVerificationAgent:
             await self._serper.close()
         if self._mapillary:
             await self._mapillary.close()
-
-
-def _similarity_to_confidence(similarity: float) -> float:
-    """Map CLIP cosine similarity [0.5, 0.98] to confidence [0.1, 0.95].
-
-    Below 0.5 -> 0.1 (very low), above 0.98 -> 0.95 (very high).
-    Linear interpolation in between.
-    """
-    if similarity <= 0.5:
-        return 0.1
-    if similarity >= 0.98:
-        return 0.95
-    # Linear map: 0.5->0.1, 0.98->0.95
-    return 0.1 + (similarity - 0.5) * (0.85 / 0.48)
 
 
 def _extract_category(text: str) -> str | None:

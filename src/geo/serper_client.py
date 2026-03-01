@@ -6,26 +6,35 @@ Returns structured JSON results without browser scraping.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from loguru import logger
 
+from src.cache.decorators import cached
+from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.provider_base import SearchProvider
 
 
-class SerperClient:
+class SerperClient(SearchProvider):
     """Serper.dev SERP API for Google search results."""
 
     BASE_URL = "https://google.serper.dev"
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, cache: Optional[CacheStore] = None):
         self.api_key = api_key
+        self._cache = cache
         self._client = httpx.AsyncClient(
             timeout=15.0,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
         )
 
+    @property
+    def name(self) -> str:
+        return "serper"
+
+    @cached("serper", 7200)
     async def search(self, query: str, num_results: int = 10) -> list[dict[str, Any]]:
         """Google web search via Serper API.
 
@@ -43,6 +52,7 @@ class SerperClient:
             logger.error("Serper search failed for '{}': {}", query, e)
             return []
 
+    @cached("serper", 7200)
     async def search_places(self, query: str) -> list[dict[str, Any]]:
         """Google Places search via Serper API.
 
@@ -74,6 +84,7 @@ class SerperClient:
             logger.error("Serper maps search failed for '{}': {}", query, e)
             return []
 
+    @cached("serper", 7200)
     async def search_images(self, query: str, num_results: int = 10) -> list[dict[str, Any]]:
         """Google Image search via Serper /images endpoint.
 

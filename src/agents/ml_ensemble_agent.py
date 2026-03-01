@@ -1,7 +1,7 @@
 """ML Ensemble Agent - runs multiple geolocation models in parallel.
 
-Combines predictions from GeoCLIP, StreetCLIP, and VLM geo-reasoning
-with real confidence based on model agreement, not random values.
+Discovers models via :class:`ModelRegistry` and aggregates predictions
+with real confidence based on model agreement.
 """
 
 from __future__ import annotations
@@ -12,120 +12,94 @@ from typing import Any
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
-from src.models import vlm_geo
+from src.models.base import ModelCapability
+from src.models.registry import ModelRegistry
+from src.scoring.scorer import GeoScorer
 from src.utils.geo_math import country_level_agreement, geographic_spread
+
+# Importing adapters triggers registration
+import src.models.adapters  # noqa: F401
 
 
 class MLEnsembleAgent:
     """Runs geolocation ML models in parallel and aggregates with real confidence."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
         self.settings = settings
+        self.scorer = scorer or GeoScorer(get_scoring_config())
         self.client = AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )
 
-        # Lazy-loaded ML models
-        self._geoclip = None
-        self._streetclip = None
-
-    @property
-    def geoclip(self):
-        if self._geoclip is None and self.settings.ml.enable_geoclip:
-            try:
-                from src.models.geoclip_predictor import GeoCLIPPredictor
-                self._geoclip = GeoCLIPPredictor(device=self.settings.ml.device)
-            except Exception as e:
-                logger.warning("GeoCLIP unavailable: {}", e)
-        return self._geoclip
-
-    @property
-    def streetclip(self):
-        if self._streetclip is None and self.settings.ml.enable_streetclip:
-            try:
-                from src.models.streetclip_predictor import StreetCLIPPredictor
-                self._streetclip = StreetCLIPPredictor(device=self.settings.ml.device)
-            except Exception as e:
-                logger.warning("StreetCLIP unavailable: {}", e)
-        return self._streetclip
-
     @property
     def streetclip_model_and_processor(self):
         """Expose loaded StreetCLIP model/processor for sharing with other agents."""
-        if self._streetclip and self._streetclip.model:
-            return (self._streetclip.model, self._streetclip.processor)
+        from src.models.adapters import StreetCLIPAdapter
+
+        for inst in ModelRegistry._instances.values():
+            if isinstance(inst, StreetCLIPAdapter):
+                return inst.model_and_processor
         return None
 
     async def predict(
         self,
         image_path: str,
         feature_evidence: EvidenceChain | None = None,
+        candidate_cities: list[str] | None = None,
     ) -> EvidenceChain:
-        """Run all ML models in parallel and return aggregated evidence.
-
-        Args:
-            image_path: Path to the image
-            feature_evidence: Optional evidence from feature extraction (provides context)
-        """
+        """Run all enabled ML models in parallel and return aggregated evidence."""
         chain = EvidenceChain()
         logger.info("Starting ML ensemble prediction")
 
-        # Build additional context from prior evidence
-        context = ""
+        # Build context from prior evidence
+        context: dict[str, Any] = {}
         if feature_evidence:
-            context = feature_evidence.to_prompt_context()
+            context["evidence_text"] = feature_evidence.to_prompt_context()
+        # Pass candidate cities for StreetCLIP city prediction
+        if candidate_cities:
+            context["candidate_cities"] = candidate_cities
 
-        # Run models in parallel
-        tasks = {}
+        # Discover enabled models from registry
+        models = ModelRegistry.get_enabled(self.settings)
+        if not models:
+            logger.warning("No ML models enabled")
+            return chain
 
-        # VLM geo reasoning (always available - uses API)
-        tasks["vlm_geo"] = vlm_geo.predict_location(
-            image_path, self.client, self.settings.llm.reasoning_model, context
-        )
+        logger.info("Running {} models: {}", len(models), [m.info().name for m in models])
 
-        # GeoCLIP (local model)
-        if self.geoclip:
-            tasks["geoclip"] = asyncio.to_thread(self.geoclip.predict, image_path, 5)
-
-        # StreetCLIP (local model)
-        if self.streetclip:
-            tasks["streetclip"] = asyncio.to_thread(self.streetclip.predict_country, image_path, 5)
-
-        # Gather results
+        # Run all models in parallel
+        tasks = {m.info().name: m.predict(image_path, context) for m in models}
         task_names = list(tasks.keys())
         results_list = await asyncio.gather(*tasks.values(), return_exceptions=True)
         results = dict(zip(task_names, results_list))
 
-        # Process VLM geo
-        vlm_result = results.get("vlm_geo")
-        if isinstance(vlm_result, dict):
-            chain.add_many(vlm_geo.to_evidence(vlm_result))
-            logger.info("VLM geo: country={}, conf={}", vlm_result.get("country"), vlm_result.get("confidence"))
-        elif isinstance(vlm_result, Exception):
-            logger.error("VLM geo failed: {}", vlm_result)
+        # Collect evidence from each model, applying ensemble weights
+        for model in models:
+            name = model.info().name
+            result = results.get(name)
 
-        # Process GeoCLIP
-        geoclip_result = results.get("geoclip")
-        if isinstance(geoclip_result, list) and geoclip_result and self.geoclip:
-            chain.add_many(self.geoclip.to_evidence(geoclip_result))
-            logger.info("GeoCLIP: top=({:.2f}, {:.2f}), conf={:.3f}",
-                        geoclip_result[0]["lat"], geoclip_result[0]["lon"], geoclip_result[0]["confidence"])
-        elif isinstance(geoclip_result, Exception):
-            logger.error("GeoCLIP failed: {}", geoclip_result)
+            if isinstance(result, Exception):
+                logger.error("{} failed: {}", name, result)
+                continue
 
-        # Process StreetCLIP
-        streetclip_result = results.get("streetclip")
-        if isinstance(streetclip_result, list) and streetclip_result and self.streetclip:
-            chain.add_many(self.streetclip.to_evidence(streetclip_result))
-            logger.info("StreetCLIP: top={}, conf={:.3f}",
-                        streetclip_result[0]["country"], streetclip_result[0]["confidence"])
-        elif isinstance(streetclip_result, Exception):
-            logger.error("StreetCLIP failed: {}", streetclip_result)
+            if isinstance(result, list) and result:
+                evidences = model.to_evidence(result)
 
-        # Calculate ensemble agreement and add meta-evidence
+                # Store per-model weight as metadata for ensemble voting (Fix D:
+                # don't multiply confidence directly — it inflates values to 1.0)
+                weight = self.settings.ml.model_weights.get(name, model.info().default_weight)
+                for ev in evidences:
+                    ev.metadata["model_weight"] = weight
+
+                added = chain.add_many(evidences)
+                logger.info("{}: {} predictions -> {} new evidence (weight={:.1f})", name, len(result), added, weight)
+            else:
+                logger.debug("{}: no predictions", name)
+
+        # Calculate ensemble agreement meta-evidence
         ensemble_meta = self._calculate_ensemble_confidence(results)
         if ensemble_meta:
             chain.add(ensemble_meta)
@@ -139,58 +113,57 @@ class MLEnsembleAgent:
         return chain
 
     def _calculate_ensemble_confidence(self, results: dict[str, Any]) -> Evidence | None:
-        """Calculate real confidence from model agreement.
-
-        - All models agree on country -> 0.9+ confidence
-        - 3/4 agree -> 0.7-0.9
-        - Split opinions -> 0.4-0.6
-        - Plus geographic distance between predictions as secondary metric
-        """
+        """Calculate real confidence from model agreement using per-model top-1 weighted voting."""
         countries = []
+        country_weights = []
         coords = []
 
-        # VLM geo
-        vlm = results.get("vlm_geo")
-        if isinstance(vlm, dict) and vlm.get("country"):
-            countries.append(vlm["country"])
-            if vlm.get("latitude") is not None:
-                coords.append((vlm["latitude"], vlm["longitude"]))
+        for name, result in results.items():
+            if isinstance(result, Exception) or not result:
+                continue
 
-        # GeoCLIP
-        geoclip = results.get("geoclip")
-        if isinstance(geoclip, list) and geoclip:
-            coords.append((geoclip[0]["lat"], geoclip[0]["lon"]))
-            # GeoCLIP doesn't directly predict country, but we could reverse geocode
+            # Look up model weight for weighted voting
+            weight = self.settings.ml.model_weights.get(name, 1.0)
 
-        # StreetCLIP
-        streetclip = results.get("streetclip")
-        if isinstance(streetclip, list) and streetclip:
-            countries.append(streetclip[0]["country"])
+            # Only use the top prediction per model (Fix C: prevents top-K
+            # predictions from giving one model disproportionate voting power)
+            if isinstance(result, list):
+                top_pred = None
+                for pred in result:
+                    if isinstance(pred, dict):
+                        top_pred = pred
+                        break
+                if top_pred:
+                    if top_pred.get("country"):
+                        countries.append(top_pred["country"])
+                        country_weights.append(weight)
+                    lat = top_pred.get("lat") or top_pred.get("latitude")
+                    lon = top_pred.get("lon") or top_pred.get("longitude")
+                    if lat is not None and lon is not None:
+                        coords.append((float(lat), float(lon)))
 
         if not countries and not coords:
             return None
 
-        # Country agreement
-        country_agree = country_level_agreement(countries) if countries else 0.0
-
-        # Geographic spread
-        spread = geographic_spread(coords) if len(coords) >= 2 else 0.0
-        if spread < 50:
-            geo_agree = 1.0
-        elif spread < 200:
-            geo_agree = 0.7
-        elif spread < 500:
-            geo_agree = 0.4
+        # Weighted country agreement: weight each vote by model weight
+        if countries:
+            weighted_votes: dict[str, float] = {}
+            for country, w in zip(countries, country_weights):
+                weighted_votes[country] = weighted_votes.get(country, 0) + w
+            total_weight = sum(country_weights)
+            country_agree = max(weighted_votes.values()) / total_weight if total_weight > 0 else 0.0
         else:
-            geo_agree = 0.2
+            country_agree = 0.0
 
-        # Combined confidence
+        spread = geographic_spread(coords) if len(coords) >= 2 else 0.0
+        geo_agree = self.scorer.geo_agreement_score(spread)
+
         active_models = sum(1 for v in results.values() if not isinstance(v, (Exception, type(None))))
         if active_models == 0:
             return None
 
         if countries and coords:
-            confidence = 0.5 * country_agree + 0.5 * geo_agree
+            confidence = self.scorer.blend_ensemble(country_agree, geo_agree)
         elif countries:
             confidence = country_agree
         else:

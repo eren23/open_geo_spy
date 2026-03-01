@@ -1,165 +1,157 @@
-import { useCallback, useState, useRef } from 'react';
-import { useDropzone } from 'react-dropzone';
-import { LocateResult, SSEEvent, locateImageStream } from './api';
-import ResultDisplay from './components/ResultDisplay';
-import PipelineStatus from './components/PipelineStatus';
-
-type StepState = {
-  name: string;
-  status: 'pending' | 'running' | 'completed' | 'error';
-  duration_ms?: number;
-  evidence_count?: number;
-  error?: string;
-};
-
-const STEPS = ['feature_extraction', 'ml_ensemble', 'web_intelligence', 'candidate_verification', 'reasoning'];
-const STEP_LABELS: Record<string, string> = {
-  feature_extraction: 'Feature Extraction',
-  ml_ensemble: 'ML Ensemble',
-  web_intelligence: 'Web Intelligence',
-  candidate_verification: 'Visual Verification',
-  reasoning: 'Reasoning & Verification',
-};
+import { useCallback, useMemo, useRef, useState } from 'react';
+import type { Map as LeafletMap } from 'leaflet';
+import type { EvidenceItem } from './types';
+import { useSession } from './hooks/useSession';
+import Layout from './components/Layout';
+import UploadArea from './components/upload/UploadArea';
+import ChatContainer from './components/chat/ChatContainer';
+import MapView from './components/map/MapView';
+import MapControls from './components/map/MapControls';
 
 function App() {
-  const [result, setResult] = useState<LocateResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    sessionId,
+    candidates,
+    messages,
+    loading,
+    error,
+    evidenceSummary,
+    selectedCandidateRank,
+    selectCandidate,
+    create,
+    sendMessage,
+    cancel,
+  } = useSession();
+
   const [locationHint, setLocationHint] = useState('');
-  const [preview, setPreview] = useState<string | null>(null);
-  const [steps, setSteps] = useState<StepState[]>([]);
-  const cancelRef = useRef<(() => void) | null>(null);
+  const mapRef = useRef<LeafletMap | null>(null);
 
-  const onDrop = useCallback(
-    (acceptedFiles: File[]) => {
-      const file = acceptedFiles[0];
-      if (!file) return;
+  const handleUpload = (file: File) => {
+    create(file, locationHint || undefined);
+  };
 
-      // Preview
-      const url = URL.createObjectURL(file);
-      setPreview(url);
-      setResult(null);
-      setError(null);
-      setLoading(true);
-      setSteps(STEPS.map((name) => ({ name, status: 'pending' })));
+  const handleNewAnalysis = useCallback(() => {
+    cancel();
+    setLocationHint('');
+  }, [cancel]);
 
-      const cancel = locateImageStream(
-        file,
-        locationHint || undefined,
-        (event: SSEEvent) => {
-          if (event.event === 'step_start' && event.step) {
-            setSteps((prev) =>
-              prev.map((s) => (s.name === event.step ? { ...s, status: 'running' } : s)),
-            );
-          } else if (event.event === 'step_complete' && event.step) {
-            setSteps((prev) =>
-              prev.map((s) =>
-                s.name === event.step
-                  ? {
-                      ...s,
-                      status: 'completed',
-                      duration_ms: event.duration_ms,
-                      evidence_count: event.evidence_count,
-                    }
-                  : s,
-              ),
-            );
-          } else if (event.event === 'step_error' && event.step) {
-            setSteps((prev) =>
-              prev.map((s) =>
-                s.name === event.step ? { ...s, status: 'error', error: event.error } : s,
-              ),
-            );
-          } else if (event.event === 'result' && event.data) {
-            setResult(event.data);
-          } else if (event.event === 'error') {
-            setError(event.error || 'Unknown error');
-          }
-        },
-        () => setLoading(false),
-        (err) => {
-          setError(err.message);
-          setLoading(false);
-        },
-      );
+  // Aggregate all unique evidence items across candidates + pipeline summary
+  const allEvidences = useMemo<EvidenceItem[]>(() => {
+    const seen = new Set<string>();
+    const merged: EvidenceItem[] = [];
 
-      cancelRef.current = cancel;
-    },
-    [locationHint],
-  );
+    // First: add pipeline top_evidence (most comprehensive)
+    if (evidenceSummary?.top_evidence?.length) {
+      for (const ev of evidenceSummary.top_evidence) {
+        const key = `${ev.source}:${ev.content}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(ev);
+        }
+      }
+    }
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { 'image/*': ['.jpeg', '.jpg', '.png', '.webp'] },
-    maxFiles: 1,
-    disabled: loading,
-  });
+    // Then: merge evidence from all candidates (to catch any missed)
+    for (const c of candidates) {
+      for (const ev of c.evidence_trail) {
+        const key = `${ev.source}:${ev.content}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(ev);
+        }
+      }
+    }
 
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-5xl mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">OpenGeoSpy</h1>
-          <p className="text-gray-500 mt-1">Multi-agent geolocation with evidence tracking</p>
+    return merged;
+  }, [candidates, evidenceSummary]);
+
+  const hasSession = !!sessionId;
+  const showChat = hasSession || (loading && messages.length > 0);
+
+  // Left panel: upload or chat
+  const leftPanel = (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-gray-200 bg-white flex-shrink-0 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900">OpenGeoSpy</h1>
+          <p className="text-xs text-gray-500">Multi-agent geolocation with evidence tracking</p>
         </div>
+        {showChat && (
+          <button
+            type="button"
+            onClick={handleNewAnalysis}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            New Analysis
+          </button>
+        )}
+      </div>
 
-        {/* Upload Section */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+      {!showChat ? (
+        /* Upload view */
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <input
             type="text"
             placeholder="Location hint (optional, e.g. 'Berlin, Germany')"
             value={locationHint}
             onChange={(e) => setLocationHint(e.target.value)}
-            className="w-full px-4 py-2 mb-4 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             disabled={loading}
           />
-
-          <div
-            {...getRootProps()}
-            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
-              isDragActive
-                ? 'border-blue-500 bg-blue-50'
-                : loading
-                  ? 'border-gray-200 bg-gray-50 cursor-not-allowed'
-                  : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'
-            }`}
-          >
-            <input {...getInputProps()} />
-            {preview ? (
-              <img
-                src={preview}
-                alt="Preview"
-                className="max-h-64 mx-auto rounded-lg mb-3"
-              />
-            ) : null}
-            <p className="text-gray-600">
-              {isDragActive
-                ? 'Drop image here...'
-                : loading
-                  ? 'Processing...'
-                  : 'Drop an image here, or click to select'}
-            </p>
+          <UploadArea onUpload={handleUpload} loading={loading} />
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-red-700 text-sm">{error.message}</p>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* Chat view */
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {error && (
+            <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-lg p-2 flex-shrink-0">
+              <p className="text-red-700 text-xs">{error.message}</p>
+            </div>
+          )}
+          <div className="flex-1 overflow-hidden">
+            <ChatContainer
+              messages={messages}
+              onSendMessage={sendMessage}
+              loading={loading}
+            />
           </div>
         </div>
-
-        {/* Pipeline Status */}
-        {steps.length > 0 && (
-          <PipelineStatus steps={steps} labels={STEP_LABELS} />
-        )}
-
-        {/* Error */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-            <p className="text-red-700 text-sm">{error}</p>
-          </div>
-        )}
-
-        {/* Result */}
-        {result && <ResultDisplay result={result} />}
-      </div>
+      )}
     </div>
   );
+
+  // Right panel: map
+  const rightPanel = (
+    <div className="relative h-full">
+      <MapView
+        candidates={candidates}
+        mapRef={mapRef}
+        onSelectCandidate={selectCandidate}
+      />
+      {candidates.length > 0 && (
+        <div className="absolute top-2 right-2 z-[1000]">
+          <MapControls
+            candidates={candidates}
+            mapRef={mapRef}
+            selectedCandidateRank={selectedCandidateRank}
+            selectCandidate={selectCandidate}
+            pipelineEvidences={allEvidences}
+          />
+        </div>
+      )}
+    </div>
+  );
+
+  return <Layout left={leftPanel} right={rightPanel} />;
 }
 
 export default App;

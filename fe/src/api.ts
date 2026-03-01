@@ -51,7 +51,7 @@ export interface SSEEvent {
   duration_ms?: number;
   evidence_count?: number;
   error?: string;
-  data?: LocateResult;
+  data?: Record<string, unknown>;
 }
 
 export async function locateImage(
@@ -77,61 +77,8 @@ export async function locateImage(
   return resp.json();
 }
 
-export function locateImageStream(
-  file: File,
-  locationHint: string | undefined,
-  onEvent: (event: SSEEvent) => void,
-  onDone: () => void,
-  onError: (error: Error) => void,
-): () => void {
-  const formData = new FormData();
-  formData.append('file', file);
-  if (locationHint) {
-    formData.append('location_hint', locationHint);
-  }
-
-  const abortController = new AbortController();
-
-  fetch(`${API_URL}/api/locate/stream`, {
-    method: 'POST',
-    body: formData,
-    signal: abortController.signal,
-  })
-    .then(async (response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      if (!response.body) throw new Error('No response body');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              onEvent(data);
-            } catch {
-              // Skip malformed events
-            }
-          }
-        }
-      }
-
-      onDone();
-    })
-    .catch((err) => {
-      if (err.name !== 'AbortError') {
-        onError(err);
-      }
-    });
-
-  return () => abortController.abort();
+export async function getSession(sessionId: string): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${API_URL}/api/session/${sessionId}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
 }

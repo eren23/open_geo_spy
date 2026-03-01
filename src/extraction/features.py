@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
+from src.scoring.scorer import GeoScorer
 
 FEATURE_EXTRACTION_PROMPT = """Analyze this image for geolocation clues. Extract ALL visual features that could help identify the location.
 
@@ -87,34 +88,33 @@ async def extract_visual_features(
         return _empty_features()
 
 
-def to_evidence(features: dict[str, Any]) -> list[Evidence]:
+def to_evidence(features: dict[str, Any], scorer: GeoScorer | None = None) -> list[Evidence]:
     """Convert extracted visual features to Evidence objects."""
+    if scorer is None:
+        scorer = GeoScorer()
     evidences = []
 
-    # Landmarks
     for landmark in features.get("landmarks", []):
         evidences.append(
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Landmark: {landmark}",
-                confidence=0.8,
+                confidence=scorer.source_conf("landmark"),
                 metadata={"type": "landmark"},
             )
         )
 
-    # Architecture
     arch = features.get("architecture_style")
     if arch and arch.lower() not in ("unknown", "unclear", "none"):
         evidences.append(
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Architecture style: {arch}",
-                confidence=0.6,
+                confidence=scorer.source_conf("architecture"),
                 metadata={"type": "architecture"},
             )
         )
 
-    # Traffic side
     infra = features.get("infrastructure", {})
     traffic_side = infra.get("traffic_side")
     if traffic_side and traffic_side not in ("unclear", "none"):
@@ -122,41 +122,38 @@ def to_evidence(features: dict[str, Any]) -> list[Evidence]:
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Traffic drives on: {traffic_side}",
-                confidence=0.7,
+                confidence=scorer.source_conf("traffic_side"),
                 metadata={"type": "traffic_side"},
             )
         )
 
-    # Country clues
     for clue in features.get("country_clues", []):
         evidences.append(
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Country clue: {clue}",
-                confidence=0.65,
+                confidence=scorer.source_conf("country_clue"),
                 metadata={"type": "country_clue"},
             )
         )
 
-    # Cultural indicators
     for indicator in features.get("cultural_indicators", []):
         evidences.append(
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Cultural indicator: {indicator}",
-                confidence=0.55,
+                confidence=scorer.source_conf("cultural"),
                 metadata={"type": "cultural"},
             )
         )
 
-    # Environment type
     env_type = features.get("environment_type")
     if env_type and env_type != "UNKNOWN":
         evidences.append(
             Evidence(
                 source=EvidenceSource.VLM_ANALYSIS,
                 content=f"Environment: {env_type}",
-                confidence=0.7,
+                confidence=scorer.source_conf("environment"),
                 metadata={"type": "environment", "environment_type": env_type},
             )
         )

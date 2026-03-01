@@ -22,7 +22,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # Copy source and install Python dependencies
 COPY pyproject.toml .
 COPY src/ ./src/
-RUN pip install --no-cache-dir .
+RUN pip install .
 
 RUN PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium --with-deps || true
 COPY .env .

@@ -7,11 +7,13 @@ adaptive radius logic and multi-source search patterns.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Optional
 
 import overpy
 from loguru import logger
 
+from src.cache.decorators import cached
+from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
 from src.utils.geo_math import bounding_box, haversine_distance
 
@@ -19,9 +21,11 @@ from src.utils.geo_math import bounding_box, haversine_distance
 class OSMClient:
     """OpenStreetMap Overpass API client for POI and place search."""
 
-    def __init__(self):
+    def __init__(self, cache: Optional[CacheStore] = None):
         self._api = overpy.Overpass()
+        self._cache = cache
 
+    @cached("osm", 86400)
     async def search_nearby(
         self,
         lat: float,
@@ -72,6 +76,7 @@ class OSMClient:
 
         return unique[:50]
 
+    @cached("osm", 86400)
     async def search_by_name(self, name: str, limit: int = 5) -> list[dict[str, Any]]:
         """Search OSM Nominatim for a place by name."""
         try:

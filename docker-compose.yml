@@ -8,8 +8,11 @@ services:
       - ./src:/app/src:ro
       - ./images:/app/images
       - ./.env:/app/.env:ro
+      - model-cache:/model-cache
     environment:
       - PYTHONUNBUFFERED=1
+      - HF_HOME=/model-cache/huggingface
+      - TORCH_HOME=/model-cache/torch
     ports:
       - "8000:8000"
     healthcheck:
@@ -38,6 +41,9 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - API_PROXY_TARGET=http://api:8000
     depends_on:
       - api
+
+volumes:
+  model-cache:

@@ -73,6 +73,9 @@ class GeoSettings(BaseModel):
     geonames_username: str = ""
     serper_api_key: str = ""
     mapillary_access_token: str = ""
+    brave_api_key: str = ""
+    searxng_url: str = ""
+    search_providers: list[str] = ["serper"]  # Options: serper, brave, searxng
 
 
 class MLSettings(BaseModel):
@@ -85,6 +88,36 @@ class MLSettings(BaseModel):
     device: str = "cpu"  # "cpu", "cuda", "mps"
     cache_dir: str = os.path.expanduser("~/.cache/open_geo_spy/models")
 
+    # Per-model weights for ensemble scoring
+    model_weights: dict[str, float] = {
+        "GeoCLIP": 1.0,
+        "StreetCLIP": 1.0,
+        "VLM Geo": 1.5,
+    }
+
+
+class CacheSettings(BaseModel):
+    """Caching configuration."""
+
+    enabled: bool = True
+    backend: str = "memory"  # "memory" or "disk"
+    disk_path: str = os.path.expanduser("~/.cache/open_geo_spy/api_cache")
+    max_memory_entries: int = 1000
+
+    # TTLs per source (seconds)
+    serper_ttl: int = 7200  # 2 hours
+    osm_ttl: int = 86400  # 24 hours
+    browser_ttl: int = 1800  # 30 minutes
+    brave_ttl: int = 7200
+    searxng_ttl: int = 3600
+
+
+class CalibrationSettings(BaseModel):
+    """Confidence calibration configuration."""
+
+    enabled: bool = False
+    data_path: str = os.path.expanduser("~/.cache/open_geo_spy/calibration.json")
+
 
 class APISettings(BaseModel):
     """API server configuration."""
@@ -94,6 +127,23 @@ class APISettings(BaseModel):
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:5173"]
     rate_limit_rpm: int = 60
     max_upload_size_mb: int = 50
+
+
+class TracingSettings(BaseModel):
+    """Trace persistence configuration."""
+
+    enabled: bool = True
+    output_dir: str = "data/traces"
+    store_llm_content: bool = False  # If True, store full LLM request/response
+    index_db_path: str = "data/traces/index.db"
+
+
+class EvolutionSettings(BaseModel):
+    """Auto-evolution configuration."""
+
+    enabled: bool = False
+    weights_path: str = "data/evolution/weights.json"
+    auto_apply: bool = False  # If True, load tuned weights at startup
 
 
 # --- Main settings ---
@@ -122,6 +172,10 @@ class Settings(BaseSettings):
     geo: GeoSettings = GeoSettings()
     ml: MLSettings = MLSettings()
     api: APISettings = APISettings()
+    cache: CacheSettings = CacheSettings()
+    calibration: CalibrationSettings = CalibrationSettings()
+    tracing: TracingSettings = TracingSettings()
+    evolution: EvolutionSettings = EvolutionSettings()
 
     model_config = {
         "env_prefix": "",
@@ -168,3 +222,23 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached singleton settings instance."""
     return Settings()
+
+
+@lru_cache
+def get_scoring_config() -> "ScoringConfig":
+    """Load ScoringConfig: env-var path > evolution auto-apply > defaults."""
+    from src.scoring.config import ScoringConfig
+
+    settings = get_settings()
+
+    # 1. Explicit env var override
+    config_path = os.getenv("SCORING_CONFIG_PATH")
+    if config_path and os.path.exists(config_path):
+        return ScoringConfig.from_file(config_path)
+
+    # 2. Auto-evolution weights
+    if settings.evolution.auto_apply and os.path.exists(settings.evolution.weights_path):
+        return ScoringConfig.from_file(settings.evolution.weights_path)
+
+    # 3. Defaults (exact match to current hardcoded behavior)
+    return ScoringConfig()
