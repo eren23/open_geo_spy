@@ -4,7 +4,7 @@ All notable changes to OpenGeoSpy will be documented in this file.
 
 ---
 
-## [0.3.0] — TBD
+## [0.3.0] — 2026-03-01
 
 ### Grounding-Based Scoring Architecture
 

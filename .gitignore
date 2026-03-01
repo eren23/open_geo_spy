@@ -1,5 +1,20 @@
 .env
 data/*
+!data/traces/
+data/traces/*
+!data/traces/.gitkeep
+!data/eval/
+data/eval/*
+!data/eval/results/
+data/eval/results/*
+!data/eval/results/.gitkeep
+!data/eval/sample/
+!data/eval/sample/**
+!data/evolution/
+data/evolution/*
+!data/evolution/history/
+data/evolution/history/*
+!data/evolution/history/.gitkeep
 images/*
 
 # Node

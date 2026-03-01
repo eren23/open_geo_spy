@@ -10,10 +10,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from loguru import logger
-from openai import AsyncOpenAI
 
 from src.evidence.chain import Evidence, EvidenceChain
 from src.scoring.scorer import GeoScorer
@@ -79,7 +78,7 @@ class LocationVerifier:
     5. Calculate final verification result
     """
 
-    def __init__(self, client: AsyncOpenAI, model: str, scorer: GeoScorer | None = None):
+    def __init__(self, client: Any, model: str, scorer: GeoScorer | None = None):
         self.client = client
         self.model = model
         self.scorer = scorer or GeoScorer()

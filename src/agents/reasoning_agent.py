@@ -70,16 +70,23 @@ Return your answer as JSON:
 class ReasoningAgent:
     """Final synthesis and verification of geolocation prediction."""
 
-    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None, client: Any = None):
         self.settings = settings
         self.scorer = scorer or GeoScorer(get_scoring_config())
-        self.client = AsyncOpenAI(
+        self.client = client or AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )
         self.primary_model = settings.llm.reasoning_model
         self.verification_model = settings.llm.verification_model
         self.verifier = LocationVerifier(self.client, settings.llm.fast_model)
+        self._verifier_client = self.client
+
+    def _ensure_verifier(self) -> None:
+        """Recreate verifier if the client has been swapped (e.g. instrumented)."""
+        if self.client is not self._verifier_client:
+            self.verifier = LocationVerifier(self.client, self.settings.llm.fast_model)
+            self._verifier_client = self.client
 
     async def reason(
         self,
@@ -98,6 +105,7 @@ class ReasoningAgent:
         Returns:
             Final prediction dict with location, confidence, reasoning, evidence trail.
         """
+        self._ensure_verifier()
         logger.info("Starting reasoning with {} evidences", len(evidence_chain.evidences))
 
         # Get environment type for weight adjustment
@@ -304,6 +312,7 @@ class ReasoningAgent:
                 else:
                     c["confidence"] = self.scorer.hint_penalty(c.get("confidence", 0))
 
+        # Ranking uses capped trails; redistribution enriches output payload after ranking is final
         ranked = self._rank_candidates(
             candidates,
             dominant_country=dominant_country,
@@ -394,10 +403,13 @@ class ReasoningAgent:
         country_consensus_strength: float = 0.0,
     ) -> list[dict]:
         """Rank candidates by composite score with country consensus term."""
+        evidence_count_cap = self.scorer.config.candidate_ranking.evidence_count_cap
         for i, c in enumerate(candidates):
-            evidence_count = len(c.get("evidence_trail", []))
+            evidence_count = min(len(c.get("evidence_trail", [])), evidence_count_cap)
+            # Cap source_diversity iteration to the same limit as evidence_count
+            capped_trail = c.get("evidence_trail", [])[:evidence_count_cap]
             source_set = set()
-            for e in c.get("evidence_trail", []):
+            for e in capped_trail:
                 if isinstance(e, dict):
                     source_set.add(e.get("source", ""))
 

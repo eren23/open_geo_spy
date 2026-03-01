@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import base64
 import io
-from typing import Optional
+from typing import Any, Optional
 
 from loguru import logger
-from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
@@ -39,7 +38,7 @@ LANGUAGES_DETECTED: [comma-separated list]
 
 async def extract_text(
     image_path: str,
-    client: AsyncOpenAI,
+    client: Any,
     model: str = "google/gemini-2.5-flash",
 ) -> dict[str, list[str]]:
     """Extract text from image using VLM.

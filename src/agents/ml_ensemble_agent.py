@@ -26,10 +26,10 @@ import src.models.adapters  # noqa: F401
 class MLEnsembleAgent:
     """Runs geolocation ML models in parallel and aggregates with real confidence."""
 
-    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None, client: Any = None):
         self.settings = settings
         self.scorer = scorer or GeoScorer(get_scoring_config())
-        self.client = AsyncOpenAI(
+        self.client = client or AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )

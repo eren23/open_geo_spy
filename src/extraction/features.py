@@ -12,7 +12,6 @@ import json
 from typing import Any
 
 from loguru import logger
-from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
@@ -55,7 +54,7 @@ Return a JSON object with these fields:
 
 async def extract_visual_features(
     image_path: str,
-    client: AsyncOpenAI,
+    client: Any,
     model: str = "google/gemini-2.5-flash",
 ) -> dict[str, Any]:
     """Extract visual features from image using VLM.
