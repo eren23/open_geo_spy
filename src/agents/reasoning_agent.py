@@ -242,6 +242,26 @@ class ReasoningAgent:
 
         clusters = self._cluster_by_proximity(geo, eps_km=50)
 
+        # Compute dominant country from full evidence chain
+        all_countries = list(evidence_chain.country_predictions)
+        # User hint gets 3 extra country votes to reflect its authority
+        hint = None
+        for e in evidence_chain.evidences:
+            if e.source == EvidenceSource.USER_HINT:
+                hint = e.metadata.get("hint", "").strip().lower()
+                hint_country = e.country or hint
+                if hint_country:
+                    all_countries.extend([hint_country] * 3)
+                break
+
+        dominant_country: str | None = None
+        country_consensus_strength: float = 0.0
+        if all_countries:
+            from collections import Counter
+            counts = Counter(c.lower() for c in all_countries)
+            dominant_country, top_count = counts.most_common(1)[0]
+            country_consensus_strength = top_count / len(all_countries)
+
         # For each cluster (beyond the primary), create a candidate
         for cluster_evidences in clusters[1:max_candidates]:
             if not cluster_evidences:
@@ -267,7 +287,12 @@ class ReasoningAgent:
                 "city": candidate_city,
                 "lat": centroid[0] if centroid else None,
                 "lon": centroid[1] if centroid else None,
-                "confidence": cluster_chain.agreement_score() * 0.8,
+                "confidence": self._apply_country_penalty(
+                    cluster_chain.agreement_score() * 0.8,
+                    top_country,
+                    dominant_country,
+                    country_consensus_strength,
+                ),
                 "reasoning": f"Evidence cluster with {len(cluster_evidences)} data points",
                 "evidence_used": [e.content[:80] for e in cluster_evidences[:5]],
                 "evidence_trail": [e.to_dict() for e in cluster_evidences[:5]],
@@ -278,22 +303,22 @@ class ReasoningAgent:
         # Parallel reverse geocoding for all candidates with centroids
         await self._enrich_candidates_with_geocoding(candidates)
 
-        # Boost candidates matching the location hint
-        hint = None
-        for e in evidence_chain.evidences:
-            if e.source == EvidenceSource.USER_HINT:
-                hint = e.metadata.get("hint", "").strip().lower()
-                break
-
+        # Boost candidates matching the location hint; penalize non-matches
         if hint:
             for c in candidates:
                 c_country = (c.get("country") or "").lower()
                 c_city = (c.get("city") or "").lower()
                 c_name = (c.get("name") or "").lower()
                 if hint in c_country or hint in c_city or hint in c_name:
-                    c["confidence"] = min(1.0, c.get("confidence", 0) * 1.3)
+                    c["confidence"] = min(1.0, c.get("confidence", 0) * 1.5)
+                else:
+                    c["confidence"] = c.get("confidence", 0) * 0.5
 
-        ranked = self._rank_candidates(candidates)
+        ranked = self._rank_candidates(
+            candidates,
+            dominant_country=dominant_country,
+            country_consensus_strength=country_consensus_strength,
+        )
 
         # Redistribute full pipeline evidence to candidates based on geographic proximity
         self._redistribute_evidence(ranked, evidence_chain)
@@ -372,8 +397,13 @@ class ReasoningAgent:
         clusters.sort(key=len, reverse=True)
         return clusters
 
-    def _rank_candidates(self, candidates: list[dict]) -> list[dict]:
-        """Rank candidates by composite score."""
+    def _rank_candidates(
+        self,
+        candidates: list[dict],
+        dominant_country: str | None = None,
+        country_consensus_strength: float = 0.0,
+    ) -> list[dict]:
+        """Rank candidates by composite score with country consensus term."""
         for i, c in enumerate(candidates):
             evidence_count = len(c.get("evidence_trail", []))
             source_set = set()
@@ -388,11 +418,20 @@ class ReasoningAgent:
             # Normalize evidence count (more evidence = better)
             evidence_normalized = min(evidence_count / 10.0, 1.0)
 
+            # Country match term: 0.0 for wrong country with strong consensus,
+            # 1.0 for match or no consensus
+            c_country = (c.get("country") or "").lower()
+            if dominant_country and c_country and country_consensus_strength >= 0.5:
+                country_match = 1.0 if c_country == dominant_country else 0.0
+            else:
+                country_match = 1.0  # neutral when no consensus
+
             score = (
-                0.3 * raw_conf
-                + 0.25 * evidence_normalized
-                + 0.25 * min(source_diversity, 1.0)
-                + 0.2 * visual_match
+                0.25 * raw_conf
+                + 0.20 * evidence_normalized
+                + 0.20 * min(source_diversity, 1.0)
+                + 0.15 * visual_match
+                + 0.20 * country_match
             )
             c["_score"] = score
             c["source_diversity"] = len(source_set)
@@ -458,6 +497,26 @@ class ReasoningAgent:
                     candidate["evidence_trail"],
                     key=lambda e: e.get("confidence", 0),
                 )
+
+    @staticmethod
+    def _apply_country_penalty(
+        confidence: float,
+        candidate_country: str | None,
+        dominant_country: str | None,
+        consensus_strength: float,
+    ) -> float:
+        """Penalize confidence when candidate country contradicts dominant consensus.
+
+        At consensus_strength=0.8, a wrong-country candidate keeps ~44% of its
+        confidence.  No penalty when consensus is weak (<0.5) or countries match.
+        """
+        if not dominant_country or not candidate_country:
+            return confidence
+        if candidate_country.lower() == dominant_country.lower():
+            return confidence
+        if consensus_strength < 0.5:
+            return confidence
+        return confidence * (1.0 - consensus_strength * 0.7)
 
     def _adjust_for_environment(
         self,
