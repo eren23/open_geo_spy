@@ -51,7 +51,7 @@ class FeatureExtractionAgent:
                 Evidence(
                     source=EvidenceSource.USER_HINT,
                     content=f"User location hint: {location_hint}",
-                    confidence=0.6,
+                    confidence=0.8,
                     metadata={"hint": location_hint},
                 )
             )
@@ -120,7 +120,7 @@ class FeatureExtractionAgent:
                 Evidence(
                     source=EvidenceSource.USER_HINT,
                     content=f"User location hint: {location_hint}",
-                    confidence=0.6,
+                    confidence=0.8,
                     metadata={"hint": location_hint},
                 )
             )

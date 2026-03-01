@@ -33,7 +33,7 @@ dependencies = [
     # ML Models
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "transformers>=4.40.0",
+    "transformers>=4.44.0,<4.45.0",
     "open-clip-torch>=2.24.0",
 
     # Image processing

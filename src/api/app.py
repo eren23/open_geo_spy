@@ -59,6 +59,20 @@ async def lifespan(app: FastAPI):
     app.state.orchestrator = GeoLocatorOrchestrator(settings, cache=cache)
     app.state.settings = settings
 
+    # Preload ML models in background to avoid cold start on first request
+    async def _preload_models():
+        try:
+            # Import adapters module — @ModelRegistry.register decorators execute on import
+            import src.models.adapters  # noqa: F401
+
+            from src.models.registry import ModelRegistry
+            models = await asyncio.to_thread(ModelRegistry.get_enabled, settings)
+            logger.info("Preloaded {} ML models", len(models))
+        except Exception as e:
+            logger.warning("Model preload failed (will load on first request): {}", e)
+
+    asyncio.create_task(_preload_models())
+
     # Initialize chat subsystem
     from src.chat.session import SessionManager
     from src.chat.handler import ChatHandler

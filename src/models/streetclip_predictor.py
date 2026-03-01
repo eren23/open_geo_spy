@@ -9,7 +9,6 @@ from __future__ import annotations
 import torch
 from loguru import logger
 from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
 
 from src.evidence.chain import Evidence, EvidenceSource
 
@@ -49,11 +48,21 @@ class StreetCLIPPredictor:
             return
 
         try:
+            try:
+                from transformers import CLIPModel, CLIPProcessor
+            except ImportError:
+                from transformers.models.clip.modeling_clip import CLIPModel
+                from transformers.models.clip.processing_clip import CLIPProcessor
+
             self.model = CLIPModel.from_pretrained(self.MODEL_NAME)
             self.processor = CLIPProcessor.from_pretrained(self.MODEL_NAME)
             self.model.to(self.device)
             self.model.eval()
             logger.info("StreetCLIP loaded on {}", self.device)
+        except ImportError as e:
+            logger.warning("StreetCLIP unavailable (transformers import failed): {}", e)
+            self.model = None
+            raise
         except Exception as e:
             logger.error("Failed to load StreetCLIP: {}", e)
             raise
@@ -64,6 +73,8 @@ class StreetCLIPPredictor:
         Returns: [{"country": str, "confidence": float}, ...]
         """
         self._ensure_loaded()
+        if self.model is None:
+            return []
 
         try:
             image = Image.open(image_path).convert("RGB")
@@ -111,6 +122,8 @@ class StreetCLIPPredictor:
             return []
 
         self._ensure_loaded()
+        if self.model is None:
+            return []
 
         try:
             image = Image.open(image_path).convert("RGB")

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SSEEvent } from '../api';
 import type {
   CandidateResult,
@@ -45,7 +45,7 @@ export interface UseSessionReturn {
    * Streams from `/api/chat/{session_id}`.
    */
   sendMessage: (text: string) => void;
-  /** Abort any in-flight stream. */
+  /** Abort any in-flight stream and reset all state. */
   cancel: () => void;
 }
 
@@ -98,7 +98,8 @@ function streamSSE(
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) {
+        for (const rawLine of lines) {
+          const line = rawLine.replace(/\r$/, '');
           if (line.startsWith('data: ')) {
             try {
               const parsed = JSON.parse(line.slice(6));
@@ -142,6 +143,35 @@ export function useSession(): UseSessionReturn {
   const [pipelineResult, setPipelineResult] = useState<PipelineResultMeta | null>(null);
   const [selectedCandidateRank, setSelectedCandidateRank] = useState(1);
 
+  // Restore from sessionStorage on mount
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    if (restored) return;
+    setRestored(true);
+    try {
+      const saved = sessionStorage.getItem('ogspy_session');
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (data.sessionId) setSessionId(data.sessionId);
+        if (data.candidates?.length) setCandidates(data.candidates);
+        if (data.evidenceSummary) setEvidenceSummary(data.evidenceSummary);
+      }
+    } catch { /* ignore */ }
+  }, [restored]);
+
+  // Persist session state for page refresh recovery (only when not loading)
+  useEffect(() => {
+    if (!loading && sessionId && candidates.length > 0) {
+      try {
+        sessionStorage.setItem('ogspy_session', JSON.stringify({
+          sessionId,
+          candidates,
+          evidenceSummary,
+        }));
+      } catch { /* ignore */ }
+    }
+  }, [loading, sessionId, candidates, evidenceSummary]);
+
   const selectedCandidate = useMemo(
     () => candidates.find((c) => c.rank === selectedCandidateRank) ?? null,
     [candidates, selectedCandidateRank],
@@ -153,6 +183,7 @@ export function useSession(): UseSessionReturn {
 
   const { messages, addMessage, addAgentStep, clear: clearMessages } = useChatMessages();
   const cancelRef = useRef<(() => void) | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ---- create ----------------------------------------------------------
 
@@ -181,10 +212,25 @@ export function useSession(): UseSessionReturn {
         formData.append('location_hint', locationHint);
       }
 
+      // SSE timeout: if no events for 5 min, treat as error
+      // (first run may download ML models which takes several minutes)
+      const TIMEOUT_MS = 300_000;
+      const resetTimeout = () => {
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
+        timeoutRef.current = setTimeout(() => {
+          cancelRef.current?.();
+          setError(new Error('Pipeline timed out (no response for 5 minutes)'));
+          setLoading(false);
+        }, TIMEOUT_MS);
+      };
+      resetTimeout();
+
       const cancel = streamSSE(
         '/api/v2/locate/stream',
         formData,
         (event) => {
+          resetTimeout();
+
           const ev = event as unknown as SSEEvent & {
             data?: Record<string, unknown>;
             candidates?: CandidateResult[];
@@ -216,6 +262,9 @@ export function useSession(): UseSessionReturn {
 
               setCandidates(resultCandidates);
               if (sid) setSessionId(sid);
+
+              // Mark the pipeline step as completed
+              addAgentStep('pipeline', 'completed', 'Analysis complete');
 
               // Store evidence summary
               const rawSummary = data.evidence_summary as Record<string, unknown> | undefined;
@@ -290,8 +339,14 @@ export function useSession(): UseSessionReturn {
               break;
           }
         },
-        () => setLoading(false),
+        () => {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current);
+          timeoutRef.current = null;
+          setLoading(false);
+        },
         (err) => {
+          if (timeoutRef.current) clearTimeout(timeoutRef.current);
+          timeoutRef.current = null;
           setError(err);
           setLoading(false);
         },
@@ -390,8 +445,17 @@ export function useSession(): UseSessionReturn {
   const cancel = useCallback(() => {
     cancelRef.current?.();
     cancelRef.current = null;
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
     setLoading(false);
-  }, []);
+    setSessionId(null);
+    setCandidates([]);
+    setEvidenceSummary(null);
+    setPipelineResult(null);
+    setSelectedCandidateRank(1);
+    clearMessages();
+    try { sessionStorage.removeItem('ogspy_session'); } catch { /* ignore */ }
+  }, [clearMessages]);
 
   return {
     sessionId,

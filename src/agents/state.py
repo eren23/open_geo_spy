@@ -26,11 +26,6 @@ def _merge_evidence(left: list[Evidence], right: list[Evidence]) -> list[Evidenc
     return merged
 
 
-def _merge_dicts(left: dict, right: dict) -> dict:
-    """Shallow merge of dicts (right wins on conflict)."""
-    return {**left, **right}
-
-
 class PipelineState(TypedDict, total=False):
     """State that flows through the LangGraph pipeline.
 

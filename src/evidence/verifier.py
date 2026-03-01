@@ -108,16 +108,14 @@ class LocationVerifier:
             verified_claims_task = asyncio.create_task(
                 self._verify_claims(claims, evidence_context)
             )
-            # Pre-create placeholder claims for contradiction detection
-            placeholder_claims = [Claim(text=c) for c in claims]
-            contradictions_from_placeholders = self._detect_contradictions(
-                placeholder_claims, evidence_chain
-            )
 
             verified_claims = await verified_claims_task
 
-            # Run contradiction detection again with verified statuses
-            contradictions = self._detect_contradictions(verified_claims, evidence_chain)
+            # Skip contradiction detection with too few claims
+            if len(verified_claims) < 2:
+                contradictions = []
+            else:
+                contradictions = self._detect_contradictions(verified_claims, evidence_chain)
 
             # Step 5: Aggregate
             return self._calculate_result(prediction, verified_claims, contradictions)

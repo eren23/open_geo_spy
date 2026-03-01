@@ -220,6 +220,26 @@ class WebIntelAgent:
         """
         queries = []
 
+        # Prioritize location hint from evidence chain
+        hint = None
+        for e in evidence_chain.evidences:
+            if e.source == EvidenceSource.USER_HINT:
+                hint = e.metadata.get("hint", "").strip()
+                break
+
+        if hint:
+            # Prepend hint to top queries for higher relevance
+            if ocr_result:
+                businesses = ocr_result.get("business_names", [])
+                for biz in businesses[:2]:
+                    queries.append(f"{biz} {hint}")
+            if features:
+                landmarks = features.get("landmarks", [])
+                for lm in landmarks[:2]:
+                    queries.append(f"{lm} {hint}")
+            # Generic hint query
+            queries.append(f"location {hint}")
+
         # From OCR results
         if ocr_result:
             businesses = ocr_result.get("business_names", [])
@@ -323,10 +343,20 @@ class WebIntelAgent:
                 from src.browser.search import BrowserSearch
                 self._browser_search = BrowserSearch(self._browser_pool, cache=self._cache)
 
+            async def _single_browser_search(query: str) -> list:
+                try:
+                    results = await self._browser_search.search_google_maps(query)
+                    return self._browser_search.to_evidence(results, query)
+                except Exception as e:
+                    logger.debug("Browser search failed for '{}': {}", query[:50], e)
+                    return []
+
+            tasks = [_single_browser_search(q) for q in queries]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             all_evidences = []
-            for query in queries:
-                results = await self._browser_search.search_google_maps(query)
-                all_evidences.extend(self._browser_search.to_evidence(results, query))
+            for result in results:
+                if isinstance(result, list):
+                    all_evidences.extend(result)
 
             return all_evidences
 

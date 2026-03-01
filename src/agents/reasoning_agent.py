@@ -7,6 +7,8 @@ with evidence-based confidence (no random scores).
 
 from __future__ import annotations
 
+import asyncio
+import heapq
 import json
 import re
 from typing import Any
@@ -48,15 +50,19 @@ REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evide
 ## Environment Type
 {env_type}
 
+## Location Hint
+{location_hint}
+
 ## Instructions
-1. Weigh evidence by source reliability and mutual corroboration
-2. Prioritize evidence that multiple independent sources agree on
-3. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
-4. Country-level agreement across models is highly diagnostic
-5. OCR text (signs, plates, businesses) provides regional/local specificity
-6. Be SPECIFIC - neighborhood > city > region > country
-7. Confidence MUST reflect actual evidence strength, NOT be inflated
-8. Visual match evidence (source=visual_match) compares the query image against reference photos
+1. If a user location hint is provided, give it SIGNIFICANT weight - the user likely has contextual knowledge about where the image was taken. Candidates matching the hint should be strongly preferred.
+2. Weigh evidence by source reliability and mutual corroboration
+3. Prioritize evidence that multiple independent sources agree on
+4. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
+5. Country-level agreement across models is highly diagnostic
+6. OCR text (signs, plates, businesses) provides regional/local specificity
+7. Be SPECIFIC - neighborhood > city > region > country
+8. Confidence MUST reflect actual evidence strength, NOT be inflated
+9. Visual match evidence (source=visual_match) compares the query image against reference photos
    of candidate locations. HIGH similarity is strong evidence for that specific location.
    This is the BEST evidence for distinguishing between same-category candidates (e.g., two hotels in the same city).
 
@@ -117,6 +123,13 @@ class ReasoningAgent:
         centroid = summary.get("centroid")
         centroid_str = f"({centroid['lat']:.4f}, {centroid['lon']:.4f})" if centroid else "No centroid available"
 
+        # Extract location hint from evidence chain
+        hint_text = "No hint provided"
+        for e in evidence_chain.evidences:
+            if e.source == EvidenceSource.USER_HINT:
+                hint_text = f"User says the image is from: {e.metadata.get('hint', e.content)}"
+                break
+
         prompt = REASONING_PROMPT.format(
             evidence=evidence_chain.to_prompt_context(),
             total=summary["total_evidences"],
@@ -125,6 +138,7 @@ class ReasoningAgent:
             agreement=summary["agreement_score"],
             centroid=centroid_str,
             env_type=env_type,
+            location_hint=hint_text,
         )
 
         # Primary reasoning
@@ -241,11 +255,16 @@ class ReasoningAgent:
             countries = cluster_chain.country_predictions
             top_country = max(set(countries), key=countries.count) if countries else None
 
+            candidate_name = top_country or "Unknown location"
+            candidate_city = None
+            candidate_region = None
+            candidate_country = top_country
+
             candidate = {
-                "name": top_country or "Unknown location",
-                "country": top_country,
-                "region": None,
-                "city": None,
+                "name": candidate_name,
+                "country": candidate_country,
+                "region": candidate_region,
+                "city": candidate_city,
                 "lat": centroid[0] if centroid else None,
                 "lon": centroid[1] if centroid else None,
                 "confidence": cluster_chain.agreement_score() * 0.8,
@@ -256,7 +275,68 @@ class ReasoningAgent:
             }
             candidates.append(candidate)
 
-        return self._rank_candidates(candidates)
+        # Parallel reverse geocoding for all candidates with centroids
+        await self._enrich_candidates_with_geocoding(candidates)
+
+        # Boost candidates matching the location hint
+        hint = None
+        for e in evidence_chain.evidences:
+            if e.source == EvidenceSource.USER_HINT:
+                hint = e.metadata.get("hint", "").strip().lower()
+                break
+
+        if hint:
+            for c in candidates:
+                c_country = (c.get("country") or "").lower()
+                c_city = (c.get("city") or "").lower()
+                c_name = (c.get("name") or "").lower()
+                if hint in c_country or hint in c_city or hint in c_name:
+                    c["confidence"] = min(1.0, c.get("confidence", 0) * 1.3)
+
+        ranked = self._rank_candidates(candidates)
+
+        # Redistribute full pipeline evidence to candidates based on geographic proximity
+        self._redistribute_evidence(ranked, evidence_chain)
+
+        return ranked
+
+    async def _enrich_candidates_with_geocoding(
+        self, candidates: list[dict]
+    ) -> None:
+        """Reverse geocode all candidate centroids in parallel."""
+        try:
+            from src.geo.geocoding import reverse_geocode
+        except ImportError:
+            return
+
+        async def _geocode_candidate(c: dict) -> None:
+            lat = c.get("lat") or c.get("latitude")
+            lon = c.get("lon") or c.get("longitude")
+            if lat is None or lon is None:
+                return
+            try:
+                geo_info = await reverse_geocode(lat, lon)
+                if geo_info:
+                    if not c.get("city"):
+                        c["city"] = geo_info.get("city")
+                    if not c.get("region"):
+                        c["region"] = geo_info.get("state")
+                    if not c.get("country"):
+                        c["country"] = geo_info.get("country")
+                    # Update name if it's a placeholder
+                    city = c.get("city")
+                    country = c.get("country")
+                    if c.get("name") in (None, "Unknown location", country):
+                        parts = [p for p in [city, country] if p]
+                        if parts:
+                            c["name"] = ", ".join(parts)
+            except Exception:
+                pass
+
+        # Skip primary candidate (index 0) — already has geocoding from LLM reasoning
+        tasks = [_geocode_candidate(c) for c in candidates[1:]]
+        if tasks:
+            await asyncio.gather(*tasks)
 
     def _cluster_by_proximity(
         self,
@@ -301,16 +381,18 @@ class ReasoningAgent:
                 if isinstance(e, dict):
                     source_set.add(e.get("source", ""))
 
-            evidence_agreement = c.get("confidence", 0)
             visual_match = c.get("visual_match_score", 0) or 0
             source_diversity = len(source_set) / 5  # normalize to ~1
             raw_conf = c.get("confidence", 0)
 
+            # Normalize evidence count (more evidence = better)
+            evidence_normalized = min(evidence_count / 10.0, 1.0)
+
             score = (
-                0.4 * evidence_agreement
-                + 0.3 * visual_match
-                + 0.2 * min(source_diversity, 1.0)
-                + 0.1 * raw_conf
+                0.3 * raw_conf
+                + 0.25 * evidence_normalized
+                + 0.25 * min(source_diversity, 1.0)
+                + 0.2 * visual_match
             )
             c["_score"] = score
             c["source_diversity"] = len(source_set)
@@ -322,6 +404,60 @@ class ReasoningAgent:
             c.pop("_score", None)
 
         return candidates
+
+    def _redistribute_evidence(
+        self,
+        candidates: list[dict],
+        evidence_chain: EvidenceChain,
+    ) -> None:
+        """Redistribute pipeline evidence to candidates based on geographic proximity.
+
+        Ensures candidates have access to relevant evidence from the full pipeline,
+        not just their initial cluster evidence.
+        """
+        from src.utils.geo_math import haversine_distance
+
+        all_evidence = [e.to_dict() for e in evidence_chain.top_evidence(20)]
+
+        for candidate in candidates:
+            c_lat = candidate.get("lat") or candidate.get("latitude")
+            c_lon = candidate.get("lon") or candidate.get("longitude")
+
+            if c_lat is None or c_lon is None:
+                continue
+
+            # Collect existing evidence hashes to avoid duplicates
+            existing_hashes = {
+                e.get("content_hash", "") for e in candidate.get("evidence_trail", [])
+            }
+
+            # Add nearby pipeline evidence
+            for ev in all_evidence:
+                if ev.get("content_hash", "") in existing_hashes:
+                    continue
+
+                ev_lat = ev.get("latitude")
+                ev_lon = ev.get("longitude")
+
+                # Add geo evidence within 200km or non-geo evidence (country/text matches)
+                should_add = False
+                if ev_lat is not None and ev_lon is not None:
+                    dist = haversine_distance(c_lat, c_lon, ev_lat, ev_lon)
+                    should_add = dist < 200
+                elif ev.get("country") and ev.get("country") == candidate.get("country"):
+                    should_add = True
+
+                if should_add:
+                    candidate["evidence_trail"].append(ev)
+                    existing_hashes.add(ev.get("content_hash", ""))
+
+            # Cap at 15 evidence items per candidate
+            if len(candidate["evidence_trail"]) > 15:
+                candidate["evidence_trail"] = heapq.nlargest(
+                    15,
+                    candidate["evidence_trail"],
+                    key=lambda e: e.get("confidence", 0),
+                )
 
     def _adjust_for_environment(
         self,

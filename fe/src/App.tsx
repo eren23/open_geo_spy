@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { Map as LeafletMap } from 'leaflet';
 import type { EvidenceItem } from './types';
 import { useSession } from './hooks/useSession';
@@ -20,6 +20,7 @@ function App() {
     selectCandidate,
     create,
     sendMessage,
+    cancel,
   } = useSession();
 
   const [locationHint, setLocationHint] = useState('');
@@ -29,12 +30,28 @@ function App() {
     create(file, locationHint || undefined);
   };
 
-  // Aggregate all unique evidence items across candidates for the provenance dashboard
+  const handleNewAnalysis = useCallback(() => {
+    cancel();
+    setLocationHint('');
+  }, [cancel]);
+
+  // Aggregate all unique evidence items across candidates + pipeline summary
   const allEvidences = useMemo<EvidenceItem[]>(() => {
-    if (evidenceSummary?.top_evidence?.length) return evidenceSummary.top_evidence;
-    // Fallback: merge evidence from all candidates, dedup by content
     const seen = new Set<string>();
     const merged: EvidenceItem[] = [];
+
+    // First: add pipeline top_evidence (most comprehensive)
+    if (evidenceSummary?.top_evidence?.length) {
+      for (const ev of evidenceSummary.top_evidence) {
+        const key = `${ev.source}:${ev.content}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(ev);
+        }
+      }
+    }
+
+    // Then: merge evidence from all candidates (to catch any missed)
     for (const c of candidates) {
       for (const ev of c.evidence_trail) {
         const key = `${ev.source}:${ev.content}`;
@@ -44,21 +61,34 @@ function App() {
         }
       }
     }
+
     return merged;
   }, [candidates, evidenceSummary]);
 
   const hasSession = !!sessionId;
-  // Show chat view as soon as processing starts (loading after upload)
-  // so streaming step progress is visible, not just a static spinner.
   const showChat = hasSession || (loading && messages.length > 0);
 
   // Left panel: upload or chat
   const leftPanel = (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-200 bg-white flex-shrink-0">
-        <h1 className="text-xl font-bold text-gray-900">OpenGeoSpy</h1>
-        <p className="text-xs text-gray-500">Multi-agent geolocation with evidence tracking</p>
+      <div className="px-4 py-3 border-b border-gray-200 bg-white flex-shrink-0 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-gray-900">OpenGeoSpy</h1>
+          <p className="text-xs text-gray-500">Multi-agent geolocation with evidence tracking</p>
+        </div>
+        {showChat && (
+          <button
+            type="button"
+            onClick={handleNewAnalysis}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            New Analysis
+          </button>
+        )}
       </div>
 
       {!showChat ? (
@@ -80,13 +110,20 @@ function App() {
           )}
         </div>
       ) : (
-        /* Chat view — shown during processing AND after session is established */
-        <div className="flex-1 overflow-hidden">
-          <ChatContainer
-            messages={messages}
-            onSendMessage={sendMessage}
-            loading={loading}
-          />
+        /* Chat view */
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {error && (
+            <div className="mx-4 mt-2 bg-red-50 border border-red-200 rounded-lg p-2 flex-shrink-0">
+              <p className="text-red-700 text-xs">{error.message}</p>
+            </div>
+          )}
+          <div className="flex-1 overflow-hidden">
+            <ChatContainer
+              messages={messages}
+              onSendMessage={sendMessage}
+              loading={loading}
+            />
+          </div>
         </div>
       )}
     </div>

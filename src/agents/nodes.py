@@ -7,6 +7,7 @@ for per-node SSE events when running inside ``graph.stream()``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -17,6 +18,10 @@ from src.agents.state import PipelineState
 from src.cache import CacheStore
 from src.config.settings import Settings
 from src.evidence.chain import EvidenceChain
+
+# Module-level agent cache to avoid re-instantiating on every node call
+_agent_cache: dict[str, object] = {}
+_agent_cache_lock = asyncio.Lock()
 
 
 def _chain_to_evidences(chain: EvidenceChain) -> list:
@@ -52,7 +57,11 @@ async def feature_extraction_node(
         from src.config.settings import get_settings
         settings = get_settings()
 
-    agent = FeatureExtractionAgent(settings)
+    cache_key = "feature_extraction"
+    async with _agent_cache_lock:
+        if cache_key not in _agent_cache:
+            _agent_cache[cache_key] = FeatureExtractionAgent(settings)
+    agent = _agent_cache[cache_key]
 
     try:
         chain, metadata, features, ocr_result = await agent.extract_with_raw(
@@ -111,7 +120,11 @@ async def ml_ensemble_node(
         from src.config.settings import get_settings
         settings = get_settings()
 
-    agent = MLEnsembleAgent(settings)
+    cache_key = "ml_ensemble"
+    async with _agent_cache_lock:
+        if cache_key not in _agent_cache:
+            _agent_cache[cache_key] = MLEnsembleAgent(settings)
+    agent = _agent_cache[cache_key]
 
     try:
         feature_chain = _build_chain_from_state(state)
@@ -243,6 +256,21 @@ async def candidate_verification_node(
 
     agent = CandidateVerificationAgent(settings)
 
+    # Try to share StreetCLIP model from ML registry to avoid loading it twice
+    try:
+        from src.models.registry import ModelRegistry
+        for name, instance in dict(ModelRegistry._instances).items():
+            if "streetclip" in name.lower() and hasattr(instance, '_predictor'):
+                predictor = instance._predictor
+                if hasattr(predictor, 'model') and predictor.model is not None:
+                    if hasattr(agent, '_scorer') and agent._scorer is not None:
+                        agent._scorer.model = predictor.model
+                        agent._scorer.processor = predictor.processor
+                        logger.debug("Shared StreetCLIP model with verification agent")
+                    break
+    except Exception:
+        pass  # Fall back to loading independently
+
     try:
         evidence_chain = _build_chain_from_state(state)
         features = state.get("features", {})
@@ -300,7 +328,11 @@ async def reasoning_node(
         from src.config.settings import get_settings
         settings = get_settings()
 
-    agent = ReasoningAgent(settings)
+    cache_key = "reasoning"
+    async with _agent_cache_lock:
+        if cache_key not in _agent_cache:
+            _agent_cache[cache_key] = ReasoningAgent(settings)
+    agent = _agent_cache[cache_key]
 
     try:
         evidence_chain = _build_chain_from_state(state)

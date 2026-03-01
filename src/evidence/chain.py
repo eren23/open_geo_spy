@@ -84,6 +84,8 @@ class Evidence:
             "timestamp": self.timestamp.isoformat(),
             "content_hash": self.content_hash,
             "metadata": self.metadata,
+            "provenance": self.provenance,
+            "derived_from": self.derived_from,
         }
 
     @classmethod
@@ -139,7 +141,7 @@ class EvidenceChain:
         """
         geo = self.geo_evidences
         if len(geo) < 2:
-            return 1.0 if geo else 0.0
+            return 0.3 if geo else 0.0
 
         # Geographic spread component
         coords = [(e.latitude, e.longitude) for e in geo]
@@ -193,7 +195,7 @@ class EvidenceChain:
             "countries_mentioned": list(set(self.country_predictions)),
             "agreement_score": round(self.agreement_score(), 3),
             "centroid": {"lat": cluster[0], "lon": cluster[1]} if cluster else None,
-            "top_evidence": [e.to_dict() for e in self.top_evidence(3)],
+            "top_evidence": [e.to_dict() for e in self.top_evidence(10)],
         }
 
     def to_prompt_context(self) -> str:
