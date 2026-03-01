@@ -80,13 +80,13 @@ class ReasoningAgent:
         self.primary_model = settings.llm.reasoning_model
         self.verification_model = settings.llm.verification_model
         self.verifier = LocationVerifier(self.client, settings.llm.fast_model)
-        self._verifier_client_id = id(self.client)
+        self._verifier_client = self.client
 
     def _ensure_verifier(self) -> None:
         """Recreate verifier if the client has been swapped (e.g. instrumented)."""
-        if id(self.client) != self._verifier_client_id:
+        if self.client is not self._verifier_client:
             self.verifier = LocationVerifier(self.client, self.settings.llm.fast_model)
-            self._verifier_client_id = id(self.client)
+            self._verifier_client = self.client
 
     async def reason(
         self,
@@ -312,6 +312,7 @@ class ReasoningAgent:
                 else:
                     c["confidence"] = self.scorer.hint_penalty(c.get("confidence", 0))
 
+        # Ranking uses capped trails; redistribution enriches output payload after ranking is final
         ranked = self._rank_candidates(
             candidates,
             dominant_country=dominant_country,
@@ -402,10 +403,13 @@ class ReasoningAgent:
         country_consensus_strength: float = 0.0,
     ) -> list[dict]:
         """Rank candidates by composite score with country consensus term."""
+        evidence_count_cap = self.scorer.config.candidate_ranking.evidence_count_cap
         for i, c in enumerate(candidates):
-            evidence_count = len(c.get("evidence_trail", []))
+            evidence_count = min(len(c.get("evidence_trail", [])), evidence_count_cap)
+            # Cap source_diversity iteration to the same limit as evidence_count
+            capped_trail = c.get("evidence_trail", [])[:evidence_count_cap]
             source_set = set()
-            for e in c.get("evidence_trail", []):
+            for e in capped_trail:
                 if isinstance(e, dict):
                     source_set.add(e.get("source", ""))
 

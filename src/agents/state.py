@@ -68,6 +68,9 @@ class PipelineState(TypedDict, total=False):
     # --- Tracing ---
     trace_recorder: Optional[Any]  # TraceRecorder (optional, avoids circular import)
 
+    # --- Shared resources ---
+    _base_llm_client: Optional[Any]  # AsyncOpenAI shared across nodes
+
     # --- Pipeline metadata ---
     step_results: Annotated[list[dict], operator.add]
     errors: Annotated[list[str], operator.add]

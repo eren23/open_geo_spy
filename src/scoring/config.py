@@ -69,19 +69,20 @@ class EnsembleBlend(BaseModel):
 class CandidateRankingWeights(BaseModel):
     """Weights for the composite candidate ranking score."""
 
-    confidence: float = 0.25
-    evidence_count: float = 0.20
-    source_diversity: float = 0.20
+    confidence: float = 0.40
+    evidence_count: float = 0.10
+    source_diversity: float = 0.10
     visual_match: float = 0.15
-    country_match: float = 0.20
-    evidence_count_normalizer: float = 10.0
+    country_match: float = 0.25
+    evidence_count_cap: int = 5
+    evidence_count_normalizer: float = 5.0
     source_diversity_normalizer: float = 5.0
 
 
 class CountryPenalty(BaseModel):
     """Parameters for penalizing wrong-country candidates."""
 
-    consensus_threshold: float = 0.5
+    consensus_threshold: float = 0.3
     penalty_factor: float = 0.7
     hint_vote_multiplier: int = 3
 

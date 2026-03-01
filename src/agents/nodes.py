@@ -7,7 +7,6 @@ for per-node SSE events when running inside ``graph.stream()``.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -22,26 +21,17 @@ from src.evidence.chain import EvidenceChain
 from src.scoring.scorer import GeoScorer
 from src.tracing.instrumented_client import InstrumentedOpenAI
 
-# Module-level agent cache to avoid re-instantiating on every node call
-_agent_cache: dict[str, object] = {}
-_agent_cache_lock = asyncio.Lock()
-
 
 def _get_instrumented_client(state: PipelineState, purpose: str) -> Any:
-    """Create an LLM client, wrapping with instrumentation if a trace recorder is present."""
-    settings = get_settings()
-    base = AsyncOpenAI(base_url=settings.llm.base_url, api_key=settings.llm.api_key)
+    """Wrap shared base client with instrumentation if a trace recorder is present."""
+    base = state.get("_base_llm_client")
+    if base is None:
+        settings = get_settings()
+        base = AsyncOpenAI(base_url=settings.llm.base_url, api_key=settings.llm.api_key)
     recorder = state.get("trace_recorder")
     if recorder:
         return InstrumentedOpenAI(base, recorder, default_purpose=purpose)
     return base
-
-
-def _bind_recorder_to_writer(state: PipelineState, writer: StreamWriter) -> None:
-    """Bind the trace recorder's on_event callback to the SSE writer."""
-    recorder = state.get("trace_recorder")
-    if recorder and hasattr(recorder, "_on_event"):
-        recorder._on_event = lambda evt: writer(evt)
 
 
 def _chain_to_evidences(chain: EvidenceChain) -> list:
@@ -93,7 +83,6 @@ async def feature_extraction_node(
     """Extract EXIF, visual features, and OCR in parallel."""
     from src.agents.feature_agent import FeatureExtractionAgent
 
-    _bind_recorder_to_writer(state, writer)
     recorder = state.get("trace_recorder")
     if recorder:
         recorder.record_step("feature_extraction", "started")
@@ -105,13 +94,7 @@ async def feature_extraction_node(
         settings = get_settings()
 
     client = _get_instrumented_client(state, "feature_extraction")
-
-    cache_key = "feature_extraction"
-    async with _agent_cache_lock:
-        if cache_key not in _agent_cache:
-            _agent_cache[cache_key] = FeatureExtractionAgent(settings)
-    agent = _agent_cache[cache_key]
-    agent.client = client
+    agent = FeatureExtractionAgent(settings, client=client)
 
     try:
         chain, metadata, features, ocr_result = await agent.extract_with_raw(
@@ -170,7 +153,6 @@ async def ml_ensemble_node(
     """Run ML models (GeoCLIP, StreetCLIP, VLM geo) in parallel."""
     from src.agents.ml_ensemble_agent import MLEnsembleAgent
 
-    _bind_recorder_to_writer(state, writer)
     recorder = state.get("trace_recorder")
     if recorder:
         recorder.record_step("ml_ensemble", "started")
@@ -182,13 +164,7 @@ async def ml_ensemble_node(
         settings = get_settings()
 
     client = _get_instrumented_client(state, "ml_ensemble")
-
-    cache_key = "ml_ensemble"
-    async with _agent_cache_lock:
-        if cache_key not in _agent_cache:
-            _agent_cache[cache_key] = MLEnsembleAgent(settings)
-    agent = _agent_cache[cache_key]
-    agent.client = client
+    agent = MLEnsembleAgent(settings, client=client)
 
     try:
         feature_chain = _build_chain_from_state(state)
@@ -255,7 +231,6 @@ async def web_intelligence_node(
     """Run web search (Serper + OSM + browser)."""
     from src.agents.web_intel_agent import WebIntelAgent
 
-    _bind_recorder_to_writer(state, writer)
     recorder = state.get("trace_recorder")
     if recorder:
         recorder.record_step("web_intelligence", "started")
@@ -267,14 +242,7 @@ async def web_intelligence_node(
         settings = get_settings()
 
     client = _get_instrumented_client(state, "web_intelligence")
-
-    cache_key = "web_intelligence"
-    async with _agent_cache_lock:
-        if cache_key not in _agent_cache:
-            _agent_cache[cache_key] = WebIntelAgent(settings, cache=cache)
-    agent = _agent_cache[cache_key]
-    agent.client = client
-    agent._expander.client = client
+    agent = WebIntelAgent(settings, cache=cache, client=client)
 
     try:
         evidence_chain = _build_chain_from_state(state)
@@ -320,6 +288,8 @@ async def web_intelligence_node(
             "errors": [f"web_intelligence: {e}"],
             "step_results": [{"name": "web_intelligence", "status": "failed", "error": str(e)}],
         }
+    finally:
+        await agent.close()
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +305,6 @@ async def candidate_verification_node(
     """Visual similarity verification of top candidates."""
     from src.agents.candidate_verification_agent import CandidateVerificationAgent
 
-    _bind_recorder_to_writer(state, writer)
     recorder = state.get("trace_recorder")
     if recorder:
         recorder.record_step("candidate_verification", "started")
@@ -420,7 +389,6 @@ async def reasoning_node(
     """Final synthesis: reason over all evidence to produce prediction."""
     from src.agents.reasoning_agent import ReasoningAgent
 
-    _bind_recorder_to_writer(state, writer)
     recorder = state.get("trace_recorder")
     if recorder:
         recorder.record_step("reasoning", "started")
@@ -432,13 +400,7 @@ async def reasoning_node(
         settings = get_settings()
 
     client = _get_instrumented_client(state, "reasoning")
-
-    cache_key = "reasoning"
-    async with _agent_cache_lock:
-        if cache_key not in _agent_cache:
-            _agent_cache[cache_key] = ReasoningAgent(settings)
-    agent = _agent_cache[cache_key]
-    agent.client = client
+    agent = ReasoningAgent(settings, client=client)
 
     try:
         evidence_chain = _build_chain_from_state(state)

@@ -52,6 +52,9 @@ class InstrumentedOpenAI:
     def base_client(self) -> AsyncOpenAI:
         return self._client
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
 
 class _InstrumentedChat:
     def __init__(self, parent: InstrumentedOpenAI):
@@ -65,9 +68,14 @@ class _InstrumentedCompletions:
 
     async def create(self, **kwargs: Any) -> Any:
         """Proxy to AsyncOpenAI.chat.completions.create with instrumentation."""
+        purpose = kwargs.pop("_purpose", self._parent._default_purpose)
+
+        # Bypass instrumentation for streaming — can't extract usage from stream chunks
+        if kwargs.get("stream"):
+            return await self._parent._client.chat.completions.create(**kwargs)
+
         recorder = self._parent._recorder
         model = kwargs.get("model", "unknown")
-        purpose = kwargs.pop("_purpose", self._parent._default_purpose)
         temperature = kwargs.get("temperature", 0.0)
 
         start = time.monotonic()

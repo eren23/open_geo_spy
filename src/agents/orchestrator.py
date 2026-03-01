@@ -15,6 +15,8 @@ from typing import Any, AsyncGenerator
 
 from loguru import logger
 
+from openai import AsyncOpenAI
+
 from src.agents.graph import build_pipeline_graph
 from src.agents.state import PipelineState
 from src.cache import CacheStore
@@ -102,6 +104,12 @@ class GeoLocatorOrchestrator:
             image_hash=image_hash,
         )
 
+        # Single base LLM client shared across all pipeline nodes
+        base_llm_client = AsyncOpenAI(
+            base_url=self.settings.llm.base_url,
+            api_key=self.settings.llm.api_key,
+        )
+
         return {
             "image_path": image_path,
             "location_hint": location_hint,
@@ -122,6 +130,7 @@ class GeoLocatorOrchestrator:
             "step_results": [],
             "errors": [],
             "trace_recorder": recorder,
+            "_base_llm_client": base_llm_client,
         }
 
     async def locate(
@@ -136,56 +145,65 @@ class GeoLocatorOrchestrator:
         start = time.monotonic()
         state = self._initial_state(image_path, location_hint)
 
-        # Run graph to completion
-        final_state = await self._graph.ainvoke(state)
+        try:
+            # Run graph to completion
+            final_state = await self._graph.ainvoke(state)
 
-        elapsed = (time.monotonic() - start) * 1000
-        prediction = final_state.get("prediction", {})
+            elapsed = (time.monotonic() - start) * 1000
+            prediction = final_state.get("prediction", {})
 
-        # Build progress from step_results
-        progress = PipelineProgress()
-        for sr in final_state.get("step_results", []):
-            progress.steps.append(
-                StepResult(
-                    name=sr.get("name", ""),
-                    status=StepStatus(sr.get("status", "completed")),
-                    duration_ms=sr.get("duration_ms", 0),
-                    evidence_count=sr.get("evidence_count", 0),
-                    error=sr.get("error"),
+            # Build progress from step_results
+            progress = PipelineProgress()
+            for sr in final_state.get("step_results", []):
+                progress.steps.append(
+                    StepResult(
+                        name=sr.get("name", ""),
+                        status=StepStatus(sr.get("status", "completed")),
+                        duration_ms=sr.get("duration_ms", 0),
+                        evidence_count=sr.get("evidence_count", 0),
+                        error=sr.get("error"),
+                    )
                 )
+            progress.elapsed_ms = elapsed
+            progress.total_evidence = len(final_state.get("evidences", []))
+
+            result = {
+                **prediction,
+                "pipeline_progress": progress.to_dict(),
+                "total_evidence_count": progress.total_evidence,
+                "elapsed_ms": round(elapsed, 1),
+            }
+
+            # Finalize trace recording
+            recorder = final_state.get("trace_recorder")
+            if recorder:
+                try:
+                    trace_path = recorder.finalize(
+                        prediction=prediction,
+                        candidates=final_state.get("ranked_candidates", []),
+                        total_duration_ms=elapsed,
+                    )
+                    index = TraceIndex()
+                    try:
+                        index.index_trace(trace_path)
+                    finally:
+                        index.close()
+                except Exception as e:
+                    logger.warning("Trace finalization failed: {}", e)
+
+            logger.info(
+                "Pipeline complete: {} in {:.0f}ms with {} evidences (conf={:.2f})",
+                prediction.get("name", "Unknown"),
+                elapsed,
+                progress.total_evidence,
+                prediction.get("confidence", 0),
             )
-        progress.elapsed_ms = elapsed
-        progress.total_evidence = len(final_state.get("evidences", []))
 
-        result = {
-            **prediction,
-            "pipeline_progress": progress.to_dict(),
-            "total_evidence_count": progress.total_evidence,
-            "elapsed_ms": round(elapsed, 1),
-        }
-
-        # Finalize trace recording
-        recorder = final_state.get("trace_recorder")
-        if recorder:
-            try:
-                trace_path = recorder.finalize(
-                    prediction=prediction,
-                    candidates=final_state.get("ranked_candidates", []),
-                    total_duration_ms=elapsed,
-                )
-                TraceIndex().index_trace(trace_path)
-            except Exception as e:
-                logger.warning("Trace finalization failed: {}", e)
-
-        logger.info(
-            "Pipeline complete: {} in {:.0f}ms with {} evidences (conf={:.2f})",
-            prediction.get("name", "Unknown"),
-            elapsed,
-            progress.total_evidence,
-            prediction.get("confidence", 0),
-        )
-
-        return result
+            return result
+        finally:
+            recorder = state.get("trace_recorder")
+            if recorder:
+                recorder._close_file()
 
     async def locate_stream(
         self,
@@ -236,7 +254,11 @@ class GeoLocatorOrchestrator:
                         candidates=final_state.get("ranked_candidates", []),
                         total_duration_ms=elapsed,
                     )
-                    TraceIndex().index_trace(trace_path)
+                    index = TraceIndex()
+                    try:
+                        index.index_trace(trace_path)
+                    finally:
+                        index.close()
                 except Exception as e:
                     logger.warning("Trace finalization failed: {}", e)
 
@@ -253,6 +275,10 @@ class GeoLocatorOrchestrator:
         except Exception as e:
             logger.error("Stream pipeline failed: {}", e)
             yield {"event": "error", "error": str(e)}
+        finally:
+            recorder = state.get("trace_recorder")
+            if recorder:
+                recorder._close_file()
 
     async def locate_stream_v2(
         self,
@@ -297,7 +323,11 @@ class GeoLocatorOrchestrator:
                         candidates=ranked,
                         total_duration_ms=elapsed,
                     )
-                    TraceIndex().index_trace(trace_path)
+                    index = TraceIndex()
+                    try:
+                        index.index_trace(trace_path)
+                    finally:
+                        index.close()
                 except Exception as e:
                     logger.warning("Trace finalization failed: {}", e)
 
@@ -336,6 +366,10 @@ class GeoLocatorOrchestrator:
         except Exception as e:
             logger.error("V2 stream pipeline failed: {}", e)
             yield {"event": "error", "error": str(e)}
+        finally:
+            recorder = state.get("trace_recorder")
+            if recorder:
+                recorder._close_file()
 
     async def close(self):
         """Clean up resources."""
