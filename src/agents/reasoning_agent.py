@@ -16,24 +16,10 @@ from typing import Any
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.evidence.verifier import LocationVerifier
-
-# Environment-aware evidence weights (from original location_resolver.py)
-EVIDENCE_WEIGHTS = {
-    "URBAN": {"license_plates": 0.9, "business_names": 0.8, "street_signs": 0.8, "building_info": 0.7, "landmarks": 0.6, "visual_match": 0.95},
-    "SUBURBAN": {"street_signs": 0.9, "building_info": 0.8, "business_names": 0.7, "license_plates": 0.6, "landmarks": 0.7, "visual_match": 0.95},
-    "RURAL": {"landmarks": 0.9, "business_names": 0.8, "geographic_features": 0.8, "license_plates": 0.5, "street_signs": 0.6, "visual_match": 0.95},
-    "INDUSTRIAL": {"business_names": 0.9, "building_info": 0.8, "street_signs": 0.7, "license_plates": 0.6, "landmarks": 0.5, "visual_match": 0.95},
-    "AIRPORT": {"building_info": 0.9, "business_names": 0.8, "landmarks": 0.7, "license_plates": 0.4, "street_signs": 0.5, "visual_match": 0.95},
-    "COASTAL": {"landmarks": 0.9, "business_names": 0.8, "geographic_features": 0.8, "street_signs": 0.6, "license_plates": 0.5, "visual_match": 0.95},
-    "FOREST": {"landmarks": 0.9, "geographic_features": 0.9, "business_names": 0.6, "license_plates": 0.3, "street_signs": 0.4, "visual_match": 0.95},
-    "MOUNTAIN": {"landmarks": 0.9, "geographic_features": 0.9, "business_names": 0.6, "license_plates": 0.3, "street_signs": 0.4, "visual_match": 0.95},
-    "DESERT": {"landmarks": 0.9, "geographic_features": 0.9, "business_names": 0.7, "license_plates": 0.4, "street_signs": 0.5, "visual_match": 0.95},
-    "PARK": {"landmarks": 0.9, "business_names": 0.7, "street_signs": 0.6, "license_plates": 0.4, "building_info": 0.5, "visual_match": 0.95},
-    "HIGHWAY": {"street_signs": 0.9, "landmarks": 0.8, "business_names": 0.7, "license_plates": 0.6, "building_info": 0.5, "visual_match": 0.95},
-}
+from src.scoring.scorer import GeoScorer
 
 REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evidence below, determine the most precise location possible.
 
@@ -84,8 +70,9 @@ Return your answer as JSON:
 class ReasoningAgent:
     """Final synthesis and verification of geolocation prediction."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
         self.settings = settings
+        self.scorer = scorer or GeoScorer(get_scoring_config())
         self.client = AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
@@ -150,9 +137,12 @@ class ReasoningAgent:
                 max_tokens=2000,
             )
             prediction = _parse_prediction(resp.choices[0].message.content)
+            if prediction.get("reasoning") == "Parse failed":
+                logger.warning("LLM response unparseable, using evidence fallback")
+                prediction = _fallback_prediction(evidence_chain, scorer=self.scorer)
         except Exception as e:
             logger.error("Primary reasoning failed: {}", e)
-            prediction = _fallback_prediction(evidence_chain)
+            prediction = _fallback_prediction(evidence_chain, scorer=self.scorer)
 
         # Apply environment-specific confidence adjustment
         prediction = self._adjust_for_environment(prediction, evidence_chain, env_type)
@@ -240,7 +230,7 @@ class ReasoningAgent:
         if len(geo) < 2:
             return self._rank_candidates(candidates)
 
-        clusters = self._cluster_by_proximity(geo, eps_km=50)
+        clusters = self._cluster_by_proximity(geo, eps_km=self.scorer.cluster_eps_km)
 
         # Compute dominant country from full evidence chain
         all_countries = list(evidence_chain.country_predictions)
@@ -251,7 +241,7 @@ class ReasoningAgent:
                 hint = e.metadata.get("hint", "").strip().lower()
                 hint_country = e.country or hint
                 if hint_country:
-                    all_countries.extend([hint_country] * 3)
+                    all_countries.extend([hint_country] * self.scorer.hint_vote_multiplier)
                 break
 
         dominant_country: str | None = None
@@ -288,7 +278,7 @@ class ReasoningAgent:
                 "lat": centroid[0] if centroid else None,
                 "lon": centroid[1] if centroid else None,
                 "confidence": self._apply_country_penalty(
-                    cluster_chain.agreement_score() * 0.8,
+                    cluster_chain.agreement_score() * self.scorer.cluster_confidence_decay,
                     top_country,
                     dominant_country,
                     country_consensus_strength,
@@ -310,9 +300,9 @@ class ReasoningAgent:
                 c_city = (c.get("city") or "").lower()
                 c_name = (c.get("name") or "").lower()
                 if hint in c_country or hint in c_city or hint in c_name:
-                    c["confidence"] = min(1.0, c.get("confidence", 0) * 1.5)
+                    c["confidence"] = self.scorer.hint_boost(c.get("confidence", 0))
                 else:
-                    c["confidence"] = c.get("confidence", 0) * 0.5
+                    c["confidence"] = self.scorer.hint_penalty(c.get("confidence", 0))
 
         ranked = self._rank_candidates(
             candidates,
@@ -412,26 +402,18 @@ class ReasoningAgent:
                     source_set.add(e.get("source", ""))
 
             visual_match = c.get("visual_match_score", 0) or 0
-            source_diversity = len(source_set) / 5  # normalize to ~1
             raw_conf = c.get("confidence", 0)
 
-            # Normalize evidence count (more evidence = better)
-            evidence_normalized = min(evidence_count / 10.0, 1.0)
+            country_match = self.scorer.country_match_score(
+                c.get("country"), dominant_country, country_consensus_strength,
+            )
 
-            # Country match term: 0.0 for wrong country with strong consensus,
-            # 1.0 for match or no consensus
-            c_country = (c.get("country") or "").lower()
-            if dominant_country and c_country and country_consensus_strength >= 0.5:
-                country_match = 1.0 if c_country == dominant_country else 0.0
-            else:
-                country_match = 1.0  # neutral when no consensus
-
-            score = (
-                0.25 * raw_conf
-                + 0.20 * evidence_normalized
-                + 0.20 * min(source_diversity, 1.0)
-                + 0.15 * visual_match
-                + 0.20 * country_match
+            score = self.scorer.rank_score(
+                raw_confidence=raw_conf,
+                evidence_count=evidence_count,
+                source_diversity=len(source_set),
+                visual_match=visual_match,
+                country_match=country_match,
             )
             c["_score"] = score
             c["source_diversity"] = len(source_set)
@@ -459,8 +441,12 @@ class ReasoningAgent:
         all_evidence = [e.to_dict() for e in evidence_chain.top_evidence(20)]
 
         for candidate in candidates:
-            c_lat = candidate.get("lat") or candidate.get("latitude")
-            c_lon = candidate.get("lon") or candidate.get("longitude")
+            c_lat = candidate.get("lat")
+            if c_lat is None:
+                c_lat = candidate.get("latitude")
+            c_lon = candidate.get("lon")
+            if c_lon is None:
+                c_lon = candidate.get("longitude")
 
             if c_lat is None or c_lon is None:
                 continue
@@ -482,7 +468,7 @@ class ReasoningAgent:
                 should_add = False
                 if ev_lat is not None and ev_lon is not None:
                     dist = haversine_distance(c_lat, c_lon, ev_lat, ev_lon)
-                    should_add = dist < 200
+                    should_add = dist < self.scorer.evidence_redistribution_radius_km
                 elif ev.get("country") and ev.get("country") == candidate.get("country"):
                     should_add = True
 
@@ -490,33 +476,25 @@ class ReasoningAgent:
                     candidate["evidence_trail"].append(ev)
                     existing_hashes.add(ev.get("content_hash", ""))
 
-            # Cap at 15 evidence items per candidate
-            if len(candidate["evidence_trail"]) > 15:
+            # Cap evidence items per candidate
+            if len(candidate["evidence_trail"]) > self.scorer.max_evidence_per_candidate:
                 candidate["evidence_trail"] = heapq.nlargest(
-                    15,
+                    self.scorer.max_evidence_per_candidate,
                     candidate["evidence_trail"],
                     key=lambda e: e.get("confidence", 0),
                 )
 
-    @staticmethod
     def _apply_country_penalty(
+        self,
         confidence: float,
         candidate_country: str | None,
         dominant_country: str | None,
         consensus_strength: float,
     ) -> float:
-        """Penalize confidence when candidate country contradicts dominant consensus.
-
-        At consensus_strength=0.8, a wrong-country candidate keeps ~44% of its
-        confidence.  No penalty when consensus is weak (<0.5) or countries match.
-        """
-        if not dominant_country or not candidate_country:
-            return confidence
-        if candidate_country.lower() == dominant_country.lower():
-            return confidence
-        if consensus_strength < 0.5:
-            return confidence
-        return confidence * (1.0 - consensus_strength * 0.7)
+        """Penalize confidence when candidate country contradicts dominant consensus."""
+        return self.scorer.country_penalty(
+            confidence, candidate_country, dominant_country, consensus_strength,
+        )
 
     def _adjust_for_environment(
         self,
@@ -524,15 +502,11 @@ class ReasoningAgent:
         evidence_chain: EvidenceChain,
         env_type: str,
     ) -> dict:
-        """Apply environment-specific evidence weighting.
-
-        Adapted from location_resolver.py's environment refinement.
-        """
-        weights = EVIDENCE_WEIGHTS.get(env_type, {})
+        """Apply environment-specific evidence weighting."""
+        weights = self.scorer.env_weights(env_type)
         if not weights:
             return prediction
 
-        # Count evidence types and apply weights
         type_scores = []
         for e in evidence_chain.evidences:
             e_type = e.metadata.get("type", "")
@@ -543,9 +517,8 @@ class ReasoningAgent:
 
         if type_scores:
             env_confidence = sum(type_scores) / len(type_scores)
-            # Blend with LLM confidence (60% LLM, 40% environment-weighted)
             original_conf = prediction.get("confidence", 0.5)
-            blended = 0.6 * original_conf + 0.4 * env_confidence
+            blended = self.scorer.blend_env_confidence(original_conf, env_confidence)
             prediction["confidence"] = round(max(0.0, min(1.0, blended)), 3)
 
         return prediction
@@ -574,8 +547,12 @@ def _parse_prediction(raw: str) -> dict[str, Any]:
     return {"name": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.0, "reasoning": "Parse failed"}
 
 
-def _fallback_prediction(chain: EvidenceChain) -> dict[str, Any]:
+def _fallback_prediction(chain: EvidenceChain, scorer: GeoScorer | None = None) -> dict[str, Any]:
     """Generate a prediction from evidence centroid when LLM fails."""
+    if scorer is None:
+        from src.config.settings import get_scoring_config
+        scorer = GeoScorer(get_scoring_config())
+
     cluster = chain.location_cluster()
     countries = chain.country_predictions
     top_country = max(set(countries), key=countries.count) if countries else None
@@ -586,7 +563,7 @@ def _fallback_prediction(chain: EvidenceChain) -> dict[str, Any]:
             "country": top_country,
             "lat": cluster[0],
             "lon": cluster[1],
-            "confidence": chain.agreement_score() * 0.7,
+            "confidence": scorer.fallback_confidence(chain.agreement_score()),
             "reasoning": "Fallback: centroid of evidence coordinates",
         }
     return {"name": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.0, "reasoning": "No evidence available"}

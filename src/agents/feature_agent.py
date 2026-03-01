@@ -11,18 +11,20 @@ import asyncio
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.extraction import features as visual_features
 from src.extraction import ocr
 from src.extraction.metadata import MetadataExtractor
+from src.scoring.scorer import GeoScorer
 
 
 class FeatureExtractionAgent:
     """Runs EXIF + VLM visual analysis + OCR in parallel."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
         self.settings = settings
+        self.scorer = scorer or GeoScorer(get_scoring_config())
         self.client = AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
@@ -51,7 +53,7 @@ class FeatureExtractionAgent:
                 Evidence(
                     source=EvidenceSource.USER_HINT,
                     content=f"User location hint: {location_hint}",
-                    confidence=0.8,
+                    confidence=self.scorer.source_conf("user_hint"),
                     metadata={"hint": location_hint},
                 )
             )
@@ -75,7 +77,7 @@ class FeatureExtractionAgent:
         # Process visual features
         if isinstance(results[1], dict):
             feat = results[1]
-            chain.add_many(visual_features.to_evidence(feat))
+            chain.add_many(visual_features.to_evidence(feat, scorer=self.scorer))
             logger.info(
                 "Visual features: env={}, landmarks={}, country_clues={}",
                 feat.get("environment_type"),
@@ -89,7 +91,7 @@ class FeatureExtractionAgent:
         # Process OCR
         if isinstance(results[2], dict):
             ocr_result = results[2]
-            chain.add_many(ocr.to_evidence(ocr_result))
+            chain.add_many(ocr.to_evidence(ocr_result, scorer=self.scorer))
             total_text = sum(len(v) for v in ocr_result.values() if isinstance(v, list))
             logger.info("OCR extracted {} text items", total_text)
         elif isinstance(results[2], Exception):
@@ -120,7 +122,7 @@ class FeatureExtractionAgent:
                 Evidence(
                     source=EvidenceSource.USER_HINT,
                     content=f"User location hint: {location_hint}",
-                    confidence=0.8,
+                    confidence=self.scorer.source_conf("user_hint"),
                     metadata={"hint": location_hint},
                 )
             )
@@ -138,8 +140,8 @@ class FeatureExtractionAgent:
         if metadata:
             chain.add_many(self.metadata_extractor.to_evidence(metadata))
         if feat:
-            chain.add_many(visual_features.to_evidence(feat))
+            chain.add_many(visual_features.to_evidence(feat, scorer=self.scorer))
         if ocr_result:
-            chain.add_many(ocr.to_evidence(ocr_result))
+            chain.add_many(ocr.to_evidence(ocr_result, scorer=self.scorer))
 
         return chain, metadata, feat, ocr_result

@@ -12,10 +12,11 @@ from typing import Any
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.models.base import ModelCapability
 from src.models.registry import ModelRegistry
+from src.scoring.scorer import GeoScorer
 from src.utils.geo_math import country_level_agreement, geographic_spread
 
 # Importing adapters triggers registration
@@ -25,8 +26,9 @@ import src.models.adapters  # noqa: F401
 class MLEnsembleAgent:
     """Runs geolocation ML models in parallel and aggregates with real confidence."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
         self.settings = settings
+        self.scorer = scorer or GeoScorer(get_scoring_config())
         self.client = AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
@@ -154,21 +156,14 @@ class MLEnsembleAgent:
             country_agree = 0.0
 
         spread = geographic_spread(coords) if len(coords) >= 2 else 0.0
-        if spread < 50:
-            geo_agree = 1.0
-        elif spread < 200:
-            geo_agree = 0.7
-        elif spread < 500:
-            geo_agree = 0.4
-        else:
-            geo_agree = 0.2
+        geo_agree = self.scorer.geo_agreement_score(spread)
 
         active_models = sum(1 for v in results.values() if not isinstance(v, (Exception, type(None))))
         if active_models == 0:
             return None
 
         if countries and coords:
-            confidence = 0.5 * country_agree + 0.5 * geo_agree
+            confidence = self.scorer.blend_ensemble(country_agree, geo_agree)
         elif countries:
             confidence = country_agree
         else:

@@ -103,6 +103,7 @@ class EvidenceChain:
 
     evidences: list[Evidence] = field(default_factory=list)
     _hashes: set[str] = field(default_factory=set, repr=False)
+    _geo_evidences: list[Evidence] = field(default_factory=list, repr=False)
 
     def add(self, evidence: Evidence) -> bool:
         """Add evidence if not a duplicate. Returns True if added."""
@@ -110,6 +111,8 @@ class EvidenceChain:
             return False
         self._hashes.add(evidence.content_hash)
         self.evidences.append(evidence)
+        if evidence.has_coordinates:
+            self._geo_evidences.append(evidence)
         return True
 
     def add_many(self, evidences: list[Evidence]) -> int:
@@ -119,7 +122,7 @@ class EvidenceChain:
     @property
     def geo_evidences(self) -> list[Evidence]:
         """Evidences that have coordinates."""
-        return [e for e in self.evidences if e.has_coordinates]
+        return self._geo_evidences
 
     @property
     def country_predictions(self) -> list[str]:
@@ -134,37 +137,45 @@ class EvidenceChain:
         ]
         return weighted_centroid(points)
 
-    def agreement_score(self) -> float:
+    def agreement_score(self, scorer=None) -> float:
         """How much the evidence agrees (0-1).
 
         Based on geographic spread of coordinate predictions and country agreement.
+        Accepts an optional GeoScorer for configurable thresholds.
         """
         geo = self.geo_evidences
-        if len(geo) < 2:
-            return 0.3 if geo else 0.0
+        if scorer:
+            if len(geo) < 2:
+                return scorer.single_evidence_agreement() if geo else scorer.no_evidence_agreement()
+        else:
+            if len(geo) < 2:
+                return 0.3 if geo else 0.0
 
-        # Geographic spread component
         coords = [(e.latitude, e.longitude) for e in geo]
         from src.utils.geo_math import geographic_spread
 
         spread = geographic_spread(coords)
 
-        # Tight cluster (<50km) = high agreement, >500km = low
-        if spread < 50:
-            geo_agreement = 1.0
-        elif spread < 200:
-            geo_agreement = 0.7
-        elif spread < 500:
-            geo_agreement = 0.4
+        if scorer:
+            geo_agreement = scorer.geo_agreement_score(spread)
         else:
-            geo_agreement = 0.2
+            # Legacy step-function behavior (kept for backward compat when no scorer)
+            if spread < 50:
+                geo_agreement = 1.0
+            elif spread < 200:
+                geo_agreement = 0.7
+            elif spread < 500:
+                geo_agreement = 0.4
+            else:
+                geo_agreement = 0.2
 
-        # Country agreement component
         countries = self.country_predictions
         if countries:
             from src.utils.geo_math import country_level_agreement
 
             country_agree = country_level_agreement(countries)
+            if scorer:
+                return scorer.blend_agreement(geo_agreement, country_agree)
             return 0.6 * geo_agreement + 0.4 * country_agree
 
         return geo_agreement
@@ -217,3 +228,4 @@ class EvidenceChain:
     def clear(self) -> None:
         self.evidences.clear()
         self._hashes.clear()
+        self._geo_evidences.clear()

@@ -62,6 +62,19 @@ class LocateResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class GroundingInfo(BaseModel):
+    """Per-level grounding verdict from the HierarchicalResolver."""
+
+    level: str
+    value: Optional[str] = None
+    verdict: str = "uncertain"
+    confidence: float = 0.0
+    supporting_count: int = 0
+    contradicting_count: int = 0
+    source_count: int = 0
+    explanation: str = ""
+
+
 class CandidateResult(BaseModel):
     """A ranked location candidate."""
 
@@ -77,6 +90,8 @@ class CandidateResult(BaseModel):
     evidence_trail: list[EvidenceItem] = []
     visual_match_score: Optional[float] = None
     source_diversity: int = 0
+    resolved_level: Optional[str] = None
+    groundings: list[GroundingInfo] = []
 
 
 class LocateResponseV2(BaseModel):
@@ -134,7 +149,7 @@ class SessionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "2.0.0"
+    version: str = "0.2.0"
     services: dict[str, bool] = {}
 
 
@@ -147,3 +162,13 @@ class SSEEvent(BaseModel):
     evidence_count: Optional[int] = None
     error: Optional[str] = None
     data: Optional[dict[str, Any]] = None
+
+    # Tracing-specific fields (v0.3.0)
+    model: Optional[str] = None
+    tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
+    source: Optional[str] = None
+    content_preview: Optional[str] = None
+    confidence: Optional[float] = None
+    level: Optional[str] = None
+    verdict: Optional[str] = None

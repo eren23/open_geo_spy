@@ -4,6 +4,91 @@ All notable changes to OpenGeoSpy will be documented in this file.
 
 ---
 
+## [0.3.0] — TBD
+
+### Grounding-Based Scoring Architecture
+
+- **ScoringConfig**: Single Pydantic model holding all 50+ scoring parameters (`src/scoring/config.py`), serializable to JSON for eval sweeps
+- **GeoScorer**: Unified scoring API replacing scattered hardcoded weights across 12 files (`src/scoring/scorer.py`)
+- **GroundingEngine**: Evidence-based verdicts (GROUNDED/SUPPORTED/UNCERTAIN/WEAKENED/CONTRADICTED) replace opaque confidence multipliers (`src/scoring/grounding.py`)
+- **HierarchicalResolver**: Coarse-to-fine prediction with per-level grounding — continent, country, region, city, coordinates (`src/scoring/hierarchy.py`)
+- **Continuous geo-agreement**: Linear interpolation replaces step-function discontinuities in agreement scoring
+
+### Tracing & Observability
+
+- **Full trace persistence**: Every pipeline run saved as JSONL — inputs, LLM calls, evidence, timing, costs (`src/tracing/recorder.py`)
+- **LLM call instrumentation**: Token counts, costs, latency recorded for every API call (`src/tracing/instrumented_client.py`)
+- **SQLite trace index**: Cross-run queries for accuracy stats, cost analysis, performance trends (`src/tracing/index.py`)
+- **Live dashboard components**: TracingTimeline, CostMeter, LLMCallLog, EvidenceFlowView, GroundingView
+
+### Evaluation Framework
+
+- **Ground truth datasets**: Labeled image management with manifest.json format (`src/eval/dataset.py`)
+- **Standard metrics**: Accuracy@{1,25,50,150,750}km, GCD error (median/mean/p90), ECE, country/city accuracy (`src/eval/metrics.py`)
+- **LLM-as-judge**: Scores reasoning quality, evidence usage, confidence calibration, specificity (1-5 per dimension) (`src/eval/judge.py`)
+- **Eval reports**: Console table, JSON, and markdown output formats with baseline comparison (`src/eval/report.py`)
+
+### CLI & Headless Mode
+
+- **`ogs locate`**: Single-image headless geolocation with JSON/table output
+- **`ogs batch`**: Multi-image parallel processing with JSONL output
+- **`ogs eval`**: Run evaluation on labeled datasets with automatic metrics
+- **`ogs trace-stats`**: Query trace index for aggregate statistics
+- **`ogs evolve`**: Analyze eval results and suggest/apply scoring weight adjustments
+
+### Auto-Evolution
+
+- **FailureAnalyzer**: Categorizes prediction failures — wrong_country, high_confidence_wrong, model_disagreement, etc. (`src/eval/evolution.py`)
+- **WeightTuner**: Bayesian-style weight adjustment from eval results, outputs updated ScoringConfig (`src/eval/tuner.py`)
+- **Versioned evolution**: Weight history with explanations at `data/evolution/history/`
+
+---
+
+## [0.2.0] — 2026-03-01
+
+### Multi-Candidate Pipeline (v2 API)
+
+- **V2 locate endpoint**: `GET /api/v2/locate/stream` returns ranked candidates with per-candidate evidence trails
+- **Evidence clustering**: Haversine-based geographic proximity clustering (eps=50km) builds secondary candidates from evidence groups
+- **Candidate ranking formula**: Composite score blending confidence, evidence count, source diversity, visual match, and country consensus
+- **Candidate verification agent**: 4-strategy candidate generation (OCR businesses, category search, landmarks, top evidence) + StreetCLIP visual similarity scoring
+- **Reverse geocoding enrichment**: Parallel Nominatim lookups fill city/region/country for cluster-based candidates
+
+### Evidence & Scoring Improvements
+
+- **Country consensus hierarchy**: Dominant country computed from full evidence chain; user hint gets 3x country votes; wrong-country candidates penalized at construction, hint-matching, and ranking stages
+- **Hint boost/penalty**: Matching candidates 1.5x, non-matching 0.5x (was 1.3x match only)
+- **Country penalty in ranking**: New `country_match` term (0.0 for wrong country with strong consensus, 1.0 otherwise)
+- **Evidence redistribution**: Pipeline evidence redistributed to candidates by geographic proximity (200km radius), capped at 15 per candidate
+- **Search graph architecture**: Directed graph tracking queries, results, and refinement edges
+
+### Iterative Refinement
+
+- **Refinement loop**: Reasoning agent identifies weak areas (low agreement, few sources, country disagreement, low confidence) and re-runs web intelligence (max 2 iterations)
+- **Smart query expansion**: LLM generates search variations (synonyms, local-language translations, nearby landmarks) instead of raw VLM output truncation
+
+### Chat Interaction
+
+- **Chat handler**: POST `/api/chat/{session_id}` for conversational follow-up with LLM re-reasoning
+- **Session state**: In-memory session tracking with evidence chain, candidates, search graph per session
+
+### Frontend (React + Vite)
+
+- **Chat UI**: Message bubbles for user/assistant, agent step messages with pipeline stage visualization
+- **Evidence provenance dashboard**: Evidence grouped by pipeline stage (Feature Extraction, ML Ensemble, Web Intelligence, Reasoning) with per-stage metrics
+- **Map controls sidebar**: Candidate list with rank/confidence, embedded provenance dashboard, selection controls
+- **Batch upload UI**: Multi-file drag-and-drop with grid/map dashboard view
+- **Search graph visualization**: Interactive DAG of search queries and results
+- **Confidence waterfall**: Visual breakdown of confidence contributions
+
+### Infrastructure
+
+- **Docker improvements**: Model cache volume, Vite HMR with API proxy, health checks
+- **Alternative search providers**: Brave Search, SearXNG support in web intelligence tier 1
+- **Mapillary integration**: Street-level imagery fetching for candidate verification
+
+---
+
 ## [0.1.0] — 2026-02-28
 
 ### Multi-Agent Pipeline Architecture
@@ -68,42 +153,24 @@ All notable changes to OpenGeoSpy will be documented in this file.
 
 ---
 
-## Roadmap to 0.2.0
+## Delivered in 0.2.0 (from original roadmap)
 
-### Pipeline Intelligence
+The following items from the v0.1.0 roadmap were delivered in v0.2.0:
 
-1. **Patching & Iterative Refinement** — After the first pass, let the reasoning agent identify weak evidence and re-run targeted searches. Patch gaps instead of one-shot.
+1. **Patching & Iterative Refinement** — Reasoning agent identifies weak areas and re-runs targeted web intelligence (max 2 iterations)
+2. **Search Graph Architecture** — Directed graph tracking queries, results, and refinement edges
+3. **Smart Query Expansion** — LLM generates search variations (synonyms, local-language translations, nearby landmarks)
+4. **Multi-Candidate Final Output** — Top-N ranked candidates with individual confidence scores, evidence trails, and visual match scores
+5. **Chat-Like Interaction Flow** — POST `/api/chat/{session_id}` for conversational follow-up with LLM re-reasoning
+6. **Streaming Chat UI** — Chat interface with message bubbles for agent steps, inline map updates
+7. **Search Graph Visualization** — Interactive DAG of search queries and results
+8. **Evidence Provenance Dashboard** — Evidence grouped by pipeline stage with per-stage metrics
+9. **Alternative Search Providers** — Brave Search, SearXNG support in web intelligence tier 1
+10. **Batch Mode** — Multi-file drag-and-drop with grid/map dashboard view
 
-2. **Search Graph Architecture** — Replace the flat query list with a directed search graph. Nodes are queries, edges are "refine" / "broaden" / "pivot". Each node tracks which evidence it produced, enabling backtracking and branch pruning.
+### Deferred to v0.3.0
 
-3. **Smart Query Expansion** — Use LLM to generate search variations (synonyms, local-language translations, nearby landmark associations) instead of just truncating raw VLM output.
-
-### Output & Interaction
-
-4. **Multi-Candidate Final Output** — Return top-N ranked candidates with individual confidence scores, evidence trails, and visual match scores. Let the user pick or inspect the reasoning for each.
-
-5. **Chat-Like Interaction Flow** — Conversational follow-up: user can ask "why not Turkey?", "zoom into the street signs", or "try searching for X". The pipeline re-runs targeted agents based on user hints.
-
-6. **Streaming Chat UI** — Redesign the frontend as a chat interface with message bubbles for each agent step, inline map updates, and expandable evidence cards.
-
-### Visualization & Explainability
-
-7. **Search Graph Visualization** — Expose the search graph to the frontend as an interactive DAG (React Flow / dagre). Users see which search paths yielded results and which dead-ended.
-
-8. **Evidence Provenance Dashboard** — Sankey or waterfall chart tracing how each piece of evidence flowed through agents and contributed to the final confidence score.
-
-9. **GeoGuessr-Style Street View** — Embed Google Street View / Mapillary panoramas for top candidates. Let users visually verify without leaving the app.
-
-### Reliability & Performance
-
-10. **Confidence Calibration** — Benchmark confidence scores against a ground-truth dataset (e.g., GeoGuessr images with known locations). Calibrate so "80% confidence" means correct ~80% of the time.
-
-11. **Caching & Dedup Layer** — Cache Serper / OSM / browser results by query hash. Avoid redundant API calls across pipeline runs and save costs.
-
-12. **Alternative Search Providers** — Add Brave Search, SearXNG, Bing Visual Search as Tier 1 sources. Reduce single-provider dependency and cross-validate results.
-
-### Extensibility
-
-13. **Batch Mode** — Upload multiple images for batch geolocation with a summary dashboard (map with all pins, CSV export).
-
-14. **Plugin System for New Models** — Hot-pluggable model registry so new geolocation models (PlonkV2, PIGEON, etc.) can be added without touching agent code.
+- **Confidence Calibration** — Eval framework with ground-truth benchmarking (→ Milestone C)
+- **Caching & Dedup Layer** — Query hash caching for API calls
+- **GeoGuessr-Style Street View** — Embedded panoramas for candidate verification
+- **Plugin System for New Models** — Hot-pluggable model registry

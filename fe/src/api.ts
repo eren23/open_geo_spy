@@ -51,7 +51,7 @@ export interface SSEEvent {
   duration_ms?: number;
   evidence_count?: number;
   error?: string;
-  data?: LocateResult;
+  data?: Record<string, unknown>;
 }
 
 export async function locateImage(

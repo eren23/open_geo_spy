@@ -93,6 +93,77 @@ export interface ChatMessage {
 }
 
 // ---------------------------------------------------------------------------
+// Tracing & Cost
+// ---------------------------------------------------------------------------
+
+/** A single LLM call recorded during the pipeline. */
+export interface LLMCallInfo {
+  id: string;
+  model: string;
+  purpose: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  latency_ms: number;
+  timestamp: string;
+}
+
+/** Running cost state accumulated during the pipeline. */
+export interface CostState {
+  total_usd: number;
+  total_tokens: number;
+  call_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// Grounding
+// ---------------------------------------------------------------------------
+
+/** Grounding verdict for a geographic level. */
+export type GroundingVerdict =
+  | 'GROUNDED'
+  | 'SUPPORTED'
+  | 'UNCERTAIN'
+  | 'WEAKENED'
+  | 'CONTRADICTED';
+
+/** Grounding result for a single geographic level. */
+export interface GroundingInfo {
+  level: string;
+  value: string | null;
+  verdict: GroundingVerdict;
+  confidence: number;
+  supporting_count: number;
+  contradicting_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// Live evidence feed
+// ---------------------------------------------------------------------------
+
+/** A single evidence item discovered during pipeline execution. */
+export interface LiveEvidence {
+  id: string;
+  source: string;
+  content: string;
+  confidence: number;
+  timestamp: string;
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline step timing
+// ---------------------------------------------------------------------------
+
+/** Timing info for a completed pipeline step. */
+export interface StepTiming {
+  name: string;
+  status: 'running' | 'completed' | 'error';
+  start_time: number;
+  duration_ms?: number;
+  evidence_count?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 

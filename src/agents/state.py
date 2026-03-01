@@ -65,6 +65,9 @@ class PipelineState(TypedDict, total=False):
     # --- Chat history ---
     messages: Annotated[list[dict], operator.add]
 
+    # --- Tracing ---
+    trace_recorder: Optional[Any]  # TraceRecorder (optional, avoids circular import)
+
     # --- Pipeline metadata ---
     step_results: Annotated[list[dict], operator.add]
     errors: Annotated[list[str], operator.add]

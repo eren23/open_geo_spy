@@ -3,8 +3,13 @@ import type { SSEEvent } from '../api';
 import type {
   CandidateResult,
   ChatMessage,
+  CostState,
   EvidenceSummary,
+  GroundingInfo,
+  LiveEvidence,
+  LLMCallInfo,
   PipelineResultMeta,
+  StepTiming,
 } from '../types';
 import { useChatMessages } from './useChatMessages';
 
@@ -35,6 +40,16 @@ export interface UseSessionReturn {
   selectedCandidate: CandidateResult | null;
   /** Select a candidate by rank. */
   selectCandidate: (rank: number) => void;
+  /** Running cost state from LLM calls. */
+  costState: CostState;
+  /** Recorded LLM calls during the pipeline. */
+  llmCalls: LLMCallInfo[];
+  /** Live evidence feed as items are discovered. */
+  liveEvidences: LiveEvidence[];
+  /** Per-level grounding results from the hierarchical resolver. */
+  groundings: GroundingInfo[];
+  /** Pipeline step timings for the tracing timeline. */
+  stepTimings: StepTiming[];
   /**
    * Start a new locate session.
    * Streams from `/api/v2/locate/stream` and populates candidates + messages.
@@ -142,6 +157,11 @@ export function useSession(): UseSessionReturn {
   const [evidenceSummary, setEvidenceSummary] = useState<EvidenceSummary | null>(null);
   const [pipelineResult, setPipelineResult] = useState<PipelineResultMeta | null>(null);
   const [selectedCandidateRank, setSelectedCandidateRank] = useState(1);
+  const [costState, setCostState] = useState<CostState>({ total_usd: 0, total_tokens: 0, call_count: 0 });
+  const [llmCalls, setLlmCalls] = useState<LLMCallInfo[]>([]);
+  const [liveEvidences, setLiveEvidences] = useState<LiveEvidence[]>([]);
+  const [groundings, setGroundings] = useState<GroundingInfo[]>([]);
+  const [stepTimings, setStepTimings] = useState<StepTiming[]>([]);
 
   // Restore from sessionStorage on mount
   const [restored, setRestored] = useState(false);
@@ -199,6 +219,11 @@ export function useSession(): UseSessionReturn {
       setEvidenceSummary(null);
       setPipelineResult(null);
       setSelectedCandidateRank(1);
+      setCostState({ total_usd: 0, total_tokens: 0, call_count: 0 });
+      setLlmCalls([]);
+      setLiveEvidences([]);
+      setGroundings([]);
+      setStepTimings([]);
       clearMessages();
       setLoading(true);
 
@@ -239,7 +264,13 @@ export function useSession(): UseSessionReturn {
 
           switch (ev.event) {
             case 'step_start':
-              if (ev.step) addAgentStep(ev.step, 'running');
+              if (ev.step) {
+                addAgentStep(ev.step, 'running');
+                setStepTimings((prev) => [
+                  ...prev,
+                  { name: ev.step!, status: 'running', start_time: Date.now() },
+                ]);
+              }
               break;
 
             case 'step_complete':
@@ -248,11 +279,97 @@ export function useSession(): UseSessionReturn {
                   ? `${ev.evidence_count} evidence in ${ev.duration_ms ?? 0}ms`
                   : undefined;
                 addAgentStep(ev.step, 'completed', detail);
+                setStepTimings((prev) =>
+                  prev.map((s) =>
+                    s.name === ev.step
+                      ? { ...s, status: 'completed' as const, duration_ms: ev.duration_ms, evidence_count: ev.evidence_count }
+                      : s,
+                  ),
+                );
               }
               break;
 
             case 'step_error':
-              if (ev.step) addAgentStep(ev.step, 'error', ev.error);
+              if (ev.step) {
+                addAgentStep(ev.step, 'error', ev.error);
+                setStepTimings((prev) =>
+                  prev.map((s) =>
+                    s.name === ev.step ? { ...s, status: 'error' as const } : s,
+                  ),
+                );
+              }
+              break;
+
+            case 'llm_call_complete': {
+              const call: LLMCallInfo = {
+                id: `llm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                model: (ev as any).model ?? 'unknown',
+                purpose: (ev as any).purpose ?? ev.step ?? 'unknown',
+                input_tokens: (ev as any).input_tokens ?? 0,
+                output_tokens: (ev as any).output_tokens ?? 0,
+                cost_usd: (ev as any).cost_usd ?? 0,
+                latency_ms: (ev as any).latency_ms ?? 0,
+                timestamp: new Date().toISOString(),
+              };
+              setLlmCalls((prev) => {
+                const next = [...prev, call];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+              break;
+            }
+
+            case 'cost_update':
+              setCostState({
+                total_usd: (ev as any).total_usd ?? 0,
+                total_tokens: (ev as any).total_tokens ?? 0,
+                call_count: (ev as any).call_count ?? 0,
+              });
+              break;
+
+            case 'evidence_added':
+              setLiveEvidences((prev) => {
+                const next = [
+                  ...prev,
+                  {
+                    id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    source: (ev as any).source ?? 'unknown',
+                    content: (ev as any).content_preview ?? '',
+                    confidence: (ev as any).confidence ?? 0,
+                    timestamp: new Date().toISOString(),
+                  },
+                ];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+              break;
+
+            case 'evidence_batch': {
+              const items = ((ev as any).items ?? []) as any[];
+              setLiveEvidences((prev) => {
+                const newItems = items.map((item: any) => ({
+                  id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  source: item.source ?? 'unknown',
+                  content: item.content_preview ?? '',
+                  confidence: item.confidence ?? 0,
+                  timestamp: new Date().toISOString(),
+                }));
+                const next = [...prev, ...newItems];
+                return next.length > 200 ? next.slice(-200) : next;
+              });
+              break;
+            }
+
+            case 'grounding_result':
+              setGroundings((prev) => [
+                ...prev,
+                {
+                  level: (ev as any).level ?? '',
+                  value: (ev as any).value ?? '',
+                  verdict: (ev as any).verdict ?? 'UNCERTAIN',
+                  confidence: (ev as any).confidence ?? 0,
+                  supporting_count: (ev as any).supporting_count ?? 0,
+                  contradicting_count: (ev as any).contradicting_count ?? 0,
+                },
+              ]);
               break;
 
             case 'result': {
@@ -453,6 +570,11 @@ export function useSession(): UseSessionReturn {
     setEvidenceSummary(null);
     setPipelineResult(null);
     setSelectedCandidateRank(1);
+    setCostState({ total_usd: 0, total_tokens: 0, call_count: 0 });
+    setLlmCalls([]);
+    setLiveEvidences([]);
+    setGroundings([]);
+    setStepTimings([]);
     clearMessages();
     try { sessionStorage.removeItem('ogspy_session'); } catch { /* ignore */ }
   }, [clearMessages]);
@@ -468,6 +590,11 @@ export function useSession(): UseSessionReturn {
     selectedCandidateRank,
     selectedCandidate,
     selectCandidate,
+    costState,
+    llmCalls,
+    liveEvidences,
+    groundings,
+    stepTimings,
     create,
     sendMessage,
     cancel,

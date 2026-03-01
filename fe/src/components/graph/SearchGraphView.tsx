@@ -233,7 +233,15 @@ function NodeCard({
         width: NODE_WIDTH,
         height: NODE_HEIGHT,
       }}
+      role="button"
+      tabIndex={0}
       onClick={() => onSelect(node.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(node.id);
+        }
+      }}
       title={node.query}
     >
       {/* Top row: status + query */}

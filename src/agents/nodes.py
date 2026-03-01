@@ -16,8 +16,9 @@ from loguru import logger
 
 from src.agents.state import PipelineState
 from src.cache import CacheStore
-from src.config.settings import Settings
+from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import EvidenceChain
+from src.scoring.scorer import GeoScorer
 
 # Module-level agent cache to avoid re-instantiating on every node call
 _agent_cache: dict[str, object] = {}
@@ -35,6 +36,29 @@ def _build_chain_from_state(state: PipelineState) -> EvidenceChain:
     for e in state.get("evidences", []):
         chain.add(e)
     return chain
+
+
+def _emit_evidence_events(
+    writer: StreamWriter,
+    chain: EvidenceChain,
+    prev_count: int = 0,
+) -> None:
+    """Emit evidence_added SSE events only for new items since prev_count."""
+    new_evidences = chain.evidences[prev_count:]
+    if not new_evidences:
+        return
+    writer({
+        "event": "evidence_batch",
+        "items": [
+            {
+                "event": "evidence_added",
+                "source": e.source.value,
+                "content_preview": e.content[:120] if e.content else "",
+                "confidence": round(e.confidence, 3),
+            }
+            for e in new_evidences
+        ],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +92,8 @@ async def feature_extraction_node(
             state["image_path"], state.get("location_hint")
         )
         duration = round((time.monotonic() - start) * 1000, 1)
+
+        _emit_evidence_events(writer, chain)
 
         writer({
             "event": "step_complete",
@@ -145,6 +171,8 @@ async def ml_ensemble_node(
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 
+        _emit_evidence_events(writer, chain)
+
         writer({
             "event": "step_complete",
             "step": "ml_ensemble",
@@ -191,7 +219,11 @@ async def web_intelligence_node(
         from src.config.settings import get_settings
         settings = get_settings()
 
-    agent = WebIntelAgent(settings, cache=cache)
+    cache_key = "web_intelligence"
+    async with _agent_cache_lock:
+        if cache_key not in _agent_cache:
+            _agent_cache[cache_key] = WebIntelAgent(settings, cache=cache)
+    agent = _agent_cache[cache_key]
 
     try:
         evidence_chain = _build_chain_from_state(state)
@@ -206,7 +238,7 @@ async def web_intelligence_node(
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 
-        await agent.close()
+        _emit_evidence_events(writer, chain)
 
         writer({
             "event": "step_complete",
@@ -283,6 +315,8 @@ async def candidate_verification_node(
 
         await agent.close()
 
+        _emit_evidence_events(writer, chain)
+
         writer({
             "event": "step_complete",
             "step": "candidate_verification",
@@ -343,6 +377,25 @@ async def reasoning_node(
         prediction = ranked[0] if ranked else await agent.reason(evidence_chain, features)
         duration = round((time.monotonic() - start) * 1000, 1)
 
+        # Emit grounding results from hierarchical resolver
+        try:
+            from src.scoring.grounding import GroundingEngine
+            from src.scoring.hierarchy import HierarchicalResolver
+            resolver = HierarchicalResolver(engine=GroundingEngine())
+            hier_pred = resolver.resolve(prediction, evidence_chain)
+            for level_g in hier_pred.groundings.values():
+                writer({
+                    "event": "grounding_result",
+                    "level": level_g.level.name.lower(),
+                    "value": level_g.value or "",
+                    "verdict": level_g.grounding.verdict.value if level_g.grounding else "UNCERTAIN",
+                    "confidence": round(level_g.grounding.confidence, 3) if level_g.grounding else 0,
+                    "supporting_count": len(level_g.grounding.supporting) if level_g.grounding else 0,
+                    "contradicting_count": len(level_g.grounding.contradicting) if level_g.grounding else 0,
+                })
+        except Exception as grounding_err:
+            logger.debug("Grounding emission skipped: {}", grounding_err)
+
         writer({
             "event": "step_complete",
             "step": "reasoning",
@@ -384,8 +437,11 @@ async def refinement_check_node(
     writer: StreamWriter,
 ) -> dict[str, Any]:
     """Decide if refinement loop is needed based on evidence quality."""
+    scorer = GeoScorer(get_scoring_config())
+    thresholds = scorer.refinement
+
     iteration = state.get("iteration", 0) + 1
-    max_iter = state.get("max_iterations", 2)
+    max_iter = state.get("max_iterations", thresholds.max_iterations)
     prediction = state.get("prediction", {})
 
     # Never loop more than max_iterations
@@ -396,11 +452,11 @@ async def refinement_check_node(
     weak_areas: list[str] = []
     evidence_chain = _build_chain_from_state(state)
 
-    if evidence_chain.agreement_score() < 0.5:
+    if evidence_chain.agreement_score(scorer) < thresholds.min_geographic_agreement:
         weak_areas.append("low_geographic_agreement")
 
     sources = {e.source.value for e in evidence_chain.evidences}
-    if len(sources) < 3:
+    if len(sources) < thresholds.min_evidence_sources:
         weak_areas.append("few_evidence_sources")
 
     web_sources = {"serper", "google_maps", "osm", "browser"}
@@ -410,10 +466,10 @@ async def refinement_check_node(
     countries = evidence_chain.country_predictions
     if countries:
         from src.utils.geo_math import country_level_agreement
-        if country_level_agreement(countries) < 0.6:
+        if country_level_agreement(countries) < thresholds.min_country_agreement:
             weak_areas.append("country_disagreement")
 
-    if prediction.get("confidence", 0) < 0.4:
+    if prediction.get("confidence", 0) < thresholds.min_top_confidence:
         weak_areas.append("low_top_confidence")
 
     should_refine = len(weak_areas) > 0

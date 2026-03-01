@@ -129,6 +129,23 @@ class APISettings(BaseModel):
     max_upload_size_mb: int = 50
 
 
+class TracingSettings(BaseModel):
+    """Trace persistence configuration."""
+
+    enabled: bool = True
+    output_dir: str = "data/traces"
+    store_llm_content: bool = False  # If True, store full LLM request/response
+    index_db_path: str = "data/traces/index.db"
+
+
+class EvolutionSettings(BaseModel):
+    """Auto-evolution configuration."""
+
+    enabled: bool = False
+    weights_path: str = "data/evolution/weights.json"
+    auto_apply: bool = False  # If True, load tuned weights at startup
+
+
 # --- Main settings ---
 
 
@@ -157,6 +174,8 @@ class Settings(BaseSettings):
     api: APISettings = APISettings()
     cache: CacheSettings = CacheSettings()
     calibration: CalibrationSettings = CalibrationSettings()
+    tracing: TracingSettings = TracingSettings()
+    evolution: EvolutionSettings = EvolutionSettings()
 
     model_config = {
         "env_prefix": "",
@@ -203,3 +222,23 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached singleton settings instance."""
     return Settings()
+
+
+@lru_cache
+def get_scoring_config() -> "ScoringConfig":
+    """Load ScoringConfig: env-var path > evolution auto-apply > defaults."""
+    from src.scoring.config import ScoringConfig
+
+    settings = get_settings()
+
+    # 1. Explicit env var override
+    config_path = os.getenv("SCORING_CONFIG_PATH")
+    if config_path and os.path.exists(config_path):
+        return ScoringConfig.from_file(config_path)
+
+    # 2. Auto-evolution weights
+    if settings.evolution.auto_apply and os.path.exists(settings.evolution.weights_path):
+        return ScoringConfig.from_file(settings.evolution.weights_path)
+
+    # 3. Defaults (exact match to current hardcoded behavior)
+    return ScoringConfig()
