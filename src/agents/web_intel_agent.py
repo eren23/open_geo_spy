@@ -14,7 +14,6 @@ import re
 from typing import Any
 
 from loguru import logger
-
 from openai import AsyncOpenAI
 
 from src.cache import CacheStore
@@ -31,7 +30,7 @@ from src.utils.geo_math import validate_coordinates
 class WebIntelAgent:
     """Tiered web search and verification agent."""
 
-    def __init__(self, settings: Settings, cache: CacheStore | None = None):
+    def __init__(self, settings: Settings, cache: CacheStore | None = None, client: Any = None):
         self.settings = settings
         self._cache = cache
         self._providers: list[SearchProvider] = []
@@ -41,11 +40,11 @@ class WebIntelAgent:
         self._api_semaphore = asyncio.Semaphore(10)
 
         # Smart query expansion via LLM
-        client = AsyncOpenAI(
+        self.client = client or AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )
-        self._expander = SmartQueryExpander(client, settings.llm.fast_model)
+        self._expander = SmartQueryExpander(self.client, settings.llm.fast_model)
 
         # Initialize search providers from settings
         self._init_providers()

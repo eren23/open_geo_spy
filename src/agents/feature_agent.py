@@ -7,6 +7,7 @@ producing Evidence objects for the orchestrator.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from loguru import logger
 from openai import AsyncOpenAI
@@ -22,10 +23,10 @@ from src.scoring.scorer import GeoScorer
 class FeatureExtractionAgent:
     """Runs EXIF + VLM visual analysis + OCR in parallel."""
 
-    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None, client: Any = None):
         self.settings = settings
         self.scorer = scorer or GeoScorer(get_scoring_config())
-        self.client = AsyncOpenAI(
+        self.client = client or AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )

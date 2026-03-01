@@ -20,6 +20,8 @@ from src.agents.state import PipelineState
 from src.cache import CacheStore
 from src.config.settings import Settings, get_settings
 from src.evidence.chain import EvidenceChain
+from src.tracing.recorder import TraceRecorder
+from src.tracing.index import TraceIndex
 
 
 class StepStatus(str, Enum):
@@ -86,10 +88,24 @@ class GeoLocatorOrchestrator:
         location_hint: str | None = None,
         session_id: str | None = None,
     ) -> PipelineState:
+        sid = session_id or str(uuid.uuid4())
+
+        # Create trace recorder for this pipeline run
+        try:
+            image_hash = TraceRecorder.hash_image(image_path)
+        except Exception:
+            image_hash = ""
+
+        recorder = TraceRecorder(
+            session_id=sid,
+            version=self.settings.version if hasattr(self.settings, "version") else "0.3.0",
+            image_hash=image_hash,
+        )
+
         return {
             "image_path": image_path,
             "location_hint": location_hint,
-            "session_id": session_id or str(uuid.uuid4()),
+            "session_id": sid,
             "evidences": [],
             "metadata": {},
             "features": {},
@@ -105,6 +121,7 @@ class GeoLocatorOrchestrator:
             "messages": [],
             "step_results": [],
             "errors": [],
+            "trace_recorder": recorder,
         }
 
     async def locate(
@@ -146,6 +163,19 @@ class GeoLocatorOrchestrator:
             "total_evidence_count": progress.total_evidence,
             "elapsed_ms": round(elapsed, 1),
         }
+
+        # Finalize trace recording
+        recorder = final_state.get("trace_recorder")
+        if recorder:
+            try:
+                trace_path = recorder.finalize(
+                    prediction=prediction,
+                    candidates=final_state.get("ranked_candidates", []),
+                    total_duration_ms=elapsed,
+                )
+                TraceIndex().index_trace(trace_path)
+            except Exception as e:
+                logger.warning("Trace finalization failed: {}", e)
 
         logger.info(
             "Pipeline complete: {} in {:.0f}ms with {} evidences (conf={:.2f})",
@@ -197,6 +227,19 @@ class GeoLocatorOrchestrator:
             elapsed = (time.monotonic() - start) * 1000
             prediction = final_state.get("prediction", {})
 
+            # Finalize trace recording
+            recorder = final_state.get("trace_recorder")
+            if recorder:
+                try:
+                    trace_path = recorder.finalize(
+                        prediction=prediction,
+                        candidates=final_state.get("ranked_candidates", []),
+                        total_duration_ms=elapsed,
+                    )
+                    TraceIndex().index_trace(trace_path)
+                except Exception as e:
+                    logger.warning("Trace finalization failed: {}", e)
+
             yield {
                 "event": "result",
                 "data": {
@@ -245,6 +288,19 @@ class GeoLocatorOrchestrator:
             prediction = final_state.get("prediction", {})
             ranked = final_state.get("ranked_candidates", [])
 
+            # Finalize trace recording
+            recorder = final_state.get("trace_recorder")
+            if recorder:
+                try:
+                    trace_path = recorder.finalize(
+                        prediction=prediction,
+                        candidates=ranked,
+                        total_duration_ms=elapsed,
+                    )
+                    TraceIndex().index_trace(trace_path)
+                except Exception as e:
+                    logger.warning("Trace finalization failed: {}", e)
+
             # If the pipeline produced ranked candidates, use them.
             # Otherwise, wrap the single prediction as the sole candidate.
             if not ranked and prediction:
@@ -284,3 +340,7 @@ class GeoLocatorOrchestrator:
     async def close(self):
         """Clean up resources."""
         pass
+
+
+# Alias for CLI and eval imports
+Orchestrator = GeoLocatorOrchestrator

@@ -13,7 +13,6 @@ import re
 from typing import Any
 
 from loguru import logger
-from openai import AsyncOpenAI
 from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
@@ -50,7 +49,7 @@ say so. A confident wrong answer is worse than an honest uncertain one.
 
 async def predict_location(
     image_path: str,
-    client: AsyncOpenAI,
+    client: Any,
     model: str = "google/gemini-3-flash-preview",
     additional_context: str = "",
 ) -> dict[str, Any]:

@@ -99,7 +99,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="OpenGeoSpy API",
-        version="2.0.0",
+        version="0.3.0",
         description="Multi-agent geolocation system with evidence tracking",
         lifespan=lifespan,
     )
@@ -122,7 +122,7 @@ def _register_routes(app: FastAPI):
         settings = app.state.settings
         return HealthResponse(
             status="ok",
-            version="2.0.0",
+            version="0.3.0",
             services={
                 "llm": bool(settings.llm.api_key),
                 "serper": bool(settings.geo.serper_api_key),

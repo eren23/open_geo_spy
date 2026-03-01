@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,12 +31,14 @@ class TraceRecorder:
         version: str = "",
         settings_snapshot: dict | None = None,
         image_hash: str = "",
+        on_event: Callable[[dict], None] | None = None,
     ):
         self.session_id = session_id
         self._events: list[dict] = []
         self._total_cost: float = 0.0
         self._total_tokens: int = 0
         self._llm_calls: list[dict] = []
+        self._on_event = on_event
 
         # Build output path: data/traces/YYYY-MM-DD/{session_id}.jsonl
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -57,6 +60,15 @@ class TraceRecorder:
         """Record a pipeline step start or completion."""
         event = StepEvent(step_name=step_name, status=status, **kwargs)
         self._write_event(event.to_trace_event().to_dict())
+        if self._on_event:
+            try:
+                self._on_event({
+                    "event": f"step_{status}",
+                    "step": step_name,
+                    **{k: v for k, v in kwargs.items() if k in ("duration_ms", "evidence_count", "error")},
+                })
+            except Exception:
+                pass
 
     def record_llm_call(
         self,
@@ -84,6 +96,25 @@ class TraceRecorder:
         self._total_tokens += total_tokens
         self._llm_calls.append(event.__dict__)
         self._write_event(event.to_trace_event().to_dict())
+        if self._on_event:
+            try:
+                self._on_event({
+                    "event": "llm_call_complete",
+                    "model": model,
+                    "purpose": purpose,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cost_usd": cost_usd,
+                    "latency_ms": latency_ms,
+                })
+                self._on_event({
+                    "event": "cost_update",
+                    "total_cost_usd": self._total_cost,
+                    "total_tokens": self._total_tokens,
+                    "llm_call_count": len(self._llm_calls),
+                })
+            except Exception:
+                pass
 
     def record_evidence(
         self,

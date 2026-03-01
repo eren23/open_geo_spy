@@ -13,16 +13,35 @@ from typing import Any
 
 from langgraph.types import StreamWriter
 from loguru import logger
+from openai import AsyncOpenAI
 
 from src.agents.state import PipelineState
 from src.cache import CacheStore
-from src.config.settings import Settings, get_scoring_config
+from src.config.settings import Settings, get_scoring_config, get_settings
 from src.evidence.chain import EvidenceChain
 from src.scoring.scorer import GeoScorer
+from src.tracing.instrumented_client import InstrumentedOpenAI
 
 # Module-level agent cache to avoid re-instantiating on every node call
 _agent_cache: dict[str, object] = {}
 _agent_cache_lock = asyncio.Lock()
+
+
+def _get_instrumented_client(state: PipelineState, purpose: str) -> Any:
+    """Create an LLM client, wrapping with instrumentation if a trace recorder is present."""
+    settings = get_settings()
+    base = AsyncOpenAI(base_url=settings.llm.base_url, api_key=settings.llm.api_key)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        return InstrumentedOpenAI(base, recorder, default_purpose=purpose)
+    return base
+
+
+def _bind_recorder_to_writer(state: PipelineState, writer: StreamWriter) -> None:
+    """Bind the trace recorder's on_event callback to the SSE writer."""
+    recorder = state.get("trace_recorder")
+    if recorder and hasattr(recorder, "_on_event"):
+        recorder._on_event = lambda evt: writer(evt)
 
 
 def _chain_to_evidences(chain: EvidenceChain) -> list:
@@ -74,18 +93,25 @@ async def feature_extraction_node(
     """Extract EXIF, visual features, and OCR in parallel."""
     from src.agents.feature_agent import FeatureExtractionAgent
 
+    _bind_recorder_to_writer(state, writer)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        recorder.record_step("feature_extraction", "started")
+
     writer({"event": "step_start", "step": "feature_extraction"})
     start = time.monotonic()
 
     if settings is None:
-        from src.config.settings import get_settings
         settings = get_settings()
+
+    client = _get_instrumented_client(state, "feature_extraction")
 
     cache_key = "feature_extraction"
     async with _agent_cache_lock:
         if cache_key not in _agent_cache:
             _agent_cache[cache_key] = FeatureExtractionAgent(settings)
     agent = _agent_cache[cache_key]
+    agent.client = client
 
     try:
         chain, metadata, features, ocr_result = await agent.extract_with_raw(
@@ -94,6 +120,9 @@ async def feature_extraction_node(
         duration = round((time.monotonic() - start) * 1000, 1)
 
         _emit_evidence_events(writer, chain)
+
+        if recorder:
+            recorder.record_step("feature_extraction", "completed", duration_ms=duration, evidence_count=len(chain.evidences))
 
         writer({
             "event": "step_complete",
@@ -116,6 +145,8 @@ async def feature_extraction_node(
         }
     except Exception as e:
         logger.error("Feature extraction failed: {}", e)
+        if recorder:
+            recorder.record_error(str(e), step="feature_extraction")
         writer({"event": "step_error", "step": "feature_extraction", "error": str(e)})
         return {
             "metadata": {},
@@ -139,18 +170,25 @@ async def ml_ensemble_node(
     """Run ML models (GeoCLIP, StreetCLIP, VLM geo) in parallel."""
     from src.agents.ml_ensemble_agent import MLEnsembleAgent
 
+    _bind_recorder_to_writer(state, writer)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        recorder.record_step("ml_ensemble", "started")
+
     writer({"event": "step_start", "step": "ml_ensemble"})
     start = time.monotonic()
 
     if settings is None:
-        from src.config.settings import get_settings
         settings = get_settings()
+
+    client = _get_instrumented_client(state, "ml_ensemble")
 
     cache_key = "ml_ensemble"
     async with _agent_cache_lock:
         if cache_key not in _agent_cache:
             _agent_cache[cache_key] = MLEnsembleAgent(settings)
     agent = _agent_cache[cache_key]
+    agent.client = client
 
     try:
         feature_chain = _build_chain_from_state(state)
@@ -173,6 +211,9 @@ async def ml_ensemble_node(
 
         _emit_evidence_events(writer, chain)
 
+        if recorder:
+            recorder.record_step("ml_ensemble", "completed", duration_ms=duration, evidence_count=len(chain.evidences))
+
         writer({
             "event": "step_complete",
             "step": "ml_ensemble",
@@ -191,6 +232,8 @@ async def ml_ensemble_node(
         }
     except Exception as e:
         logger.error("ML ensemble failed: {}", e)
+        if recorder:
+            recorder.record_error(str(e), step="ml_ensemble")
         writer({"event": "step_error", "step": "ml_ensemble", "error": str(e)})
         return {
             "errors": [f"ml_ensemble: {e}"],
@@ -212,18 +255,26 @@ async def web_intelligence_node(
     """Run web search (Serper + OSM + browser)."""
     from src.agents.web_intel_agent import WebIntelAgent
 
+    _bind_recorder_to_writer(state, writer)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        recorder.record_step("web_intelligence", "started")
+
     writer({"event": "step_start", "step": "web_intelligence"})
     start = time.monotonic()
 
     if settings is None:
-        from src.config.settings import get_settings
         settings = get_settings()
+
+    client = _get_instrumented_client(state, "web_intelligence")
 
     cache_key = "web_intelligence"
     async with _agent_cache_lock:
         if cache_key not in _agent_cache:
             _agent_cache[cache_key] = WebIntelAgent(settings, cache=cache)
     agent = _agent_cache[cache_key]
+    agent.client = client
+    agent._expander.client = client
 
     try:
         evidence_chain = _build_chain_from_state(state)
@@ -239,6 +290,9 @@ async def web_intelligence_node(
         duration = round((time.monotonic() - start) * 1000, 1)
 
         _emit_evidence_events(writer, chain)
+
+        if recorder:
+            recorder.record_step("web_intelligence", "completed", duration_ms=duration, evidence_count=len(chain.evidences))
 
         writer({
             "event": "step_complete",
@@ -259,6 +313,8 @@ async def web_intelligence_node(
         }
     except Exception as e:
         logger.error("Web intelligence failed: {}", e)
+        if recorder:
+            recorder.record_error(str(e), step="web_intelligence")
         writer({"event": "step_error", "step": "web_intelligence", "error": str(e)})
         return {
             "errors": [f"web_intelligence: {e}"],
@@ -279,11 +335,15 @@ async def candidate_verification_node(
     """Visual similarity verification of top candidates."""
     from src.agents.candidate_verification_agent import CandidateVerificationAgent
 
+    _bind_recorder_to_writer(state, writer)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        recorder.record_step("candidate_verification", "started")
+
     writer({"event": "step_start", "step": "candidate_verification"})
     start = time.monotonic()
 
     if settings is None:
-        from src.config.settings import get_settings
         settings = get_settings()
 
     agent = CandidateVerificationAgent(settings)
@@ -317,6 +377,9 @@ async def candidate_verification_node(
 
         _emit_evidence_events(writer, chain)
 
+        if recorder:
+            recorder.record_step("candidate_verification", "completed", duration_ms=duration, evidence_count=len(chain.evidences))
+
         writer({
             "event": "step_complete",
             "step": "candidate_verification",
@@ -335,6 +398,8 @@ async def candidate_verification_node(
         }
     except Exception as e:
         logger.error("Candidate verification failed: {}", e)
+        if recorder:
+            recorder.record_error(str(e), step="candidate_verification")
         writer({"event": "step_error", "step": "candidate_verification", "error": str(e)})
         return {
             "errors": [f"candidate_verification: {e}"],
@@ -355,18 +420,25 @@ async def reasoning_node(
     """Final synthesis: reason over all evidence to produce prediction."""
     from src.agents.reasoning_agent import ReasoningAgent
 
+    _bind_recorder_to_writer(state, writer)
+    recorder = state.get("trace_recorder")
+    if recorder:
+        recorder.record_step("reasoning", "started")
+
     writer({"event": "step_start", "step": "reasoning"})
     start = time.monotonic()
 
     if settings is None:
-        from src.config.settings import get_settings
         settings = get_settings()
+
+    client = _get_instrumented_client(state, "reasoning")
 
     cache_key = "reasoning"
     async with _agent_cache_lock:
         if cache_key not in _agent_cache:
             _agent_cache[cache_key] = ReasoningAgent(settings)
     agent = _agent_cache[cache_key]
+    agent.client = client
 
     try:
         evidence_chain = _build_chain_from_state(state)
@@ -384,7 +456,7 @@ async def reasoning_node(
             resolver = HierarchicalResolver(engine=GroundingEngine())
             hier_pred = resolver.resolve(prediction, evidence_chain)
             for level_g in hier_pred.groundings.values():
-                writer({
+                grounding_event = {
                     "event": "grounding_result",
                     "level": level_g.level.name.lower(),
                     "value": level_g.value or "",
@@ -392,9 +464,19 @@ async def reasoning_node(
                     "confidence": round(level_g.grounding.confidence, 3) if level_g.grounding else 0,
                     "supporting_count": len(level_g.grounding.supporting) if level_g.grounding else 0,
                     "contradicting_count": len(level_g.grounding.contradicting) if level_g.grounding else 0,
-                })
+                }
+                writer(grounding_event)
+                if recorder:
+                    recorder.record_grounding(
+                        level=grounding_event["level"],
+                        verdict=grounding_event["verdict"],
+                        confidence=grounding_event["confidence"],
+                    )
         except Exception as grounding_err:
             logger.debug("Grounding emission skipped: {}", grounding_err)
+
+        if recorder:
+            recorder.record_step("reasoning", "completed", duration_ms=duration)
 
         writer({
             "event": "step_complete",
@@ -413,6 +495,8 @@ async def reasoning_node(
         }
     except Exception as e:
         logger.error("Reasoning failed: {}", e)
+        if recorder:
+            recorder.record_error(str(e), step="reasoning")
         writer({"event": "step_error", "step": "reasoning", "error": str(e)})
         return {
             "prediction": {

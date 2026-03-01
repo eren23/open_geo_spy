@@ -70,16 +70,23 @@ Return your answer as JSON:
 class ReasoningAgent:
     """Final synthesis and verification of geolocation prediction."""
 
-    def __init__(self, settings: Settings, scorer: GeoScorer | None = None):
+    def __init__(self, settings: Settings, scorer: GeoScorer | None = None, client: Any = None):
         self.settings = settings
         self.scorer = scorer or GeoScorer(get_scoring_config())
-        self.client = AsyncOpenAI(
+        self.client = client or AsyncOpenAI(
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
         )
         self.primary_model = settings.llm.reasoning_model
         self.verification_model = settings.llm.verification_model
         self.verifier = LocationVerifier(self.client, settings.llm.fast_model)
+        self._verifier_client_id = id(self.client)
+
+    def _ensure_verifier(self) -> None:
+        """Recreate verifier if the client has been swapped (e.g. instrumented)."""
+        if id(self.client) != self._verifier_client_id:
+            self.verifier = LocationVerifier(self.client, self.settings.llm.fast_model)
+            self._verifier_client_id = id(self.client)
 
     async def reason(
         self,
@@ -98,6 +105,7 @@ class ReasoningAgent:
         Returns:
             Final prediction dict with location, confidence, reasoning, evidence trail.
         """
+        self._ensure_verifier()
         logger.info("Starting reasoning with {} evidences", len(evidence_chain.evidences))
 
         # Get environment type for weight adjustment

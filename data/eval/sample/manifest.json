@@ -1,0 +1,57 @@
+{
+  "name": "sample",
+  "description": "Smoke-test dataset with famous landmarks for pipeline validation",
+  "version": "1.0",
+  "samples": [
+    {
+      "image_path": "images/eiffel_tower.jpg",
+      "latitude": 48.8584,
+      "longitude": 2.2945,
+      "country": "France",
+      "city": "Paris",
+      "region": "Ile-de-France",
+      "difficulty": "easy",
+      "tags": ["landmark", "europe"]
+    },
+    {
+      "image_path": "images/statue_of_liberty.jpg",
+      "latitude": 40.6892,
+      "longitude": -74.0445,
+      "country": "United States",
+      "city": "New York",
+      "region": "New York",
+      "difficulty": "easy",
+      "tags": ["landmark", "north_america"]
+    },
+    {
+      "image_path": "images/taj_mahal.jpg",
+      "latitude": 27.1751,
+      "longitude": 78.0421,
+      "country": "India",
+      "city": "Agra",
+      "region": "Uttar Pradesh",
+      "difficulty": "easy",
+      "tags": ["landmark", "asia"]
+    },
+    {
+      "image_path": "images/colosseum.jpg",
+      "latitude": 41.8902,
+      "longitude": 12.4922,
+      "country": "Italy",
+      "city": "Rome",
+      "region": "Lazio",
+      "difficulty": "easy",
+      "tags": ["landmark", "europe"]
+    },
+    {
+      "image_path": "images/sydney_opera_house.jpg",
+      "latitude": -33.8568,
+      "longitude": 151.2153,
+      "country": "Australia",
+      "city": "Sydney",
+      "region": "New South Wales",
+      "difficulty": "easy",
+      "tags": ["landmark", "oceania"]
+    }
+  ]
+}

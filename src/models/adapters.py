@@ -150,7 +150,11 @@ class VLMGeoAdapter(GeoModel):
     async def predict(
         self, image_path: str, context: Optional[dict[str, Any]] = None
     ) -> list[dict]:
-        self._ensure_client()
+        # Use instrumented client from context if available
+        client = (context or {}).get("_instrumented_client")
+        if client is None:
+            self._ensure_client()
+            client = self._client
         from src.models import vlm_geo
 
         additional_context = ""
@@ -159,7 +163,7 @@ class VLMGeoAdapter(GeoModel):
 
         model = self._settings.llm.reasoning_model if self._settings else "google/gemini-2.5-pro"
         result = await vlm_geo.predict_location(
-            image_path, self._client, model, additional_context
+            image_path, client, model, additional_context
         )
         # Wrap single prediction dict into a list for consistency
         return [result] if result.get("country") else []

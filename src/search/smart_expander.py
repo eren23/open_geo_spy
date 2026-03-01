@@ -12,7 +12,6 @@ import re
 from typing import Any
 
 from loguru import logger
-from openai import AsyncOpenAI
 
 from src.evidence.chain import EvidenceChain
 from src.search.graph import QueryIntent, SearchGraph, SearchNode
@@ -52,7 +51,7 @@ Return ONLY the JSON array, no other text."""
 class SmartQueryExpander:
     """LLM-powered query expansion using Gemini Flash for speed."""
 
-    def __init__(self, client: AsyncOpenAI, model: str = "google/gemini-2.5-flash"):
+    def __init__(self, client: Any, model: str = "google/gemini-2.5-flash"):
         self.client = client
         self.model = model
 
