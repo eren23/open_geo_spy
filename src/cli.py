@@ -29,6 +29,7 @@ def locate(
     image: str = typer.Argument(..., help="Path to image file"),
     hint: Optional[str] = typer.Option(None, "--hint", "-h", help="Location hint"),
     output: str = typer.Option("table", "--output", "-o", help="Output format: json or table"),
+    quality: str = typer.Option("balanced", "--quality", help="Execution quality: fast|balanced|max"),
 ) -> None:
     """Geolocate a single image."""
     from src.agents.orchestrator import Orchestrator
@@ -41,7 +42,7 @@ def locate(
     settings = get_settings()
     orchestrator = Orchestrator(settings)
 
-    result = asyncio.run(orchestrator.locate(image, location_hint=hint))
+    result = asyncio.run(orchestrator.locate(image, location_hint=hint, quality=quality))
     prediction = result.get("prediction", result)
 
     if output == "json":
@@ -56,6 +57,7 @@ def batch(
     output: str = typer.Option("results.jsonl", "--output", "-o", help="Output JSONL path"),
     max_concurrent: int = typer.Option(3, "--max-concurrent", "-c"),
     labels: Optional[str] = typer.Option(None, "--labels", help="Ground truth CSV"),
+    quality: str = typer.Option("balanced", "--quality", help="Execution quality: fast|balanced|max"),
 ) -> None:
     """Batch geolocate all images in a directory."""
     from src.agents.orchestrator import Orchestrator
@@ -77,12 +79,12 @@ def batch(
     async def _run():
         sem = asyncio.Semaphore(max_concurrent)
         results = []
+        orchestrator = Orchestrator(settings)
 
         async def _process(img_path: Path):
             async with sem:
-                orchestrator = Orchestrator(settings)
                 try:
-                    result = await orchestrator.locate(str(img_path))
+                    result = await orchestrator.locate(str(img_path), quality=quality)
                     prediction = result.get("prediction", result)
                     prediction["image"] = str(img_path)
                     return prediction
@@ -95,6 +97,7 @@ def batch(
             results.append(result)
             console.print(f"[{i+1}/{len(images)}] {result.get('name', 'Unknown')}")
 
+        await orchestrator.close()
         return results
 
     results = asyncio.run(_run())

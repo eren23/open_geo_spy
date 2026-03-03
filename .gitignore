@@ -39,3 +39,7 @@ env/
 
 *.png
 .playwright-mcp
+
+.codex
+.attocode/traces
+.attocode/sessions

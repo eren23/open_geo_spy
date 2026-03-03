@@ -10,6 +10,7 @@ from loguru import logger
 from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.confidence import calculate_search_confidence, safe_coords
 from src.geo.provider_base import SearchProvider
 
 
@@ -23,7 +24,10 @@ class SearXNGClient(SearchProvider):
     ):
         self.base_url = base_url.rstrip("/")
         self._cache = cache
-        self._client = httpx.AsyncClient(timeout=15.0)
+        self._client = httpx.AsyncClient(
+            timeout=15.0,
+            transport=httpx.AsyncHTTPTransport(retries=2),
+        )
 
     @property
     def name(self) -> str:
@@ -90,28 +94,40 @@ class SearXNGClient(SearchProvider):
             return []
 
     def results_to_evidence(self, results: list[dict], query: str) -> list[Evidence]:
-        """Convert SearXNG results to Evidence objects."""
+        """Convert SearXNG results to Evidence objects with dynamic confidence."""
         evidences = []
-        for r in results:
+        for position, r in enumerate(results):
             title = r.get("title", "")
             snippet = r.get("snippet", "")
             link = r.get("link", "")
+            engine = r.get("engine", "")
 
             content = f"SearXNG search for '{query}': {title}"
             if snippet:
                 content += f" - {snippet[:200]}"
+            if engine:
+                content += f" [via {engine}]"
+
+            # Dynamic confidence based on result quality
+            confidence = calculate_search_confidence(
+                result=r,
+                query=query,
+                base_confidence=0.30,  # Self-hosted, variable quality
+                position=position,
+            )
 
             evidences.append(
                 Evidence(
-                    source=EvidenceSource.SERPER,
+                    source=EvidenceSource.SEARXNG,  # Fixed: use correct source
                     content=content,
-                    confidence=0.45,
+                    confidence=confidence,
                     url=link,
                     metadata={
                         "query": query,
                         "provider": "searxng",
-                        "engine": r.get("engine", ""),
+                        "engine": engine,
                         "title": title,
+                        "position": position,
                     },
                 )
             )

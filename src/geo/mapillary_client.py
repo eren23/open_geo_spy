@@ -20,6 +20,7 @@ class MapillaryClient:
         self._client = httpx.AsyncClient(
             timeout=10.0,
             headers={"Authorization": f"OAuth {access_token}"},
+            transport=httpx.AsyncHTTPTransport(retries=2),
         )
 
     async def search_nearby(

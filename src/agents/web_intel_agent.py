@@ -89,6 +89,7 @@ class WebIntelAgent:
         features: dict[str, Any] | None = None,
         ocr_result: dict[str, list[str]] | None = None,
         weak_areas: list[str] | None = None,
+        started_at_monotonic: float = 0.0,
     ) -> tuple[EvidenceChain, SearchGraph]:
         """Run tiered search based on available evidence.
 
@@ -97,6 +98,7 @@ class WebIntelAgent:
             features: Raw visual features dict
             ocr_result: Raw OCR results dict
             weak_areas: Weakness areas from refinement check (triggers targeted queries)
+            started_at_monotonic: Pipeline start time for latency budgeting
 
         Returns:
             Tuple of (evidence_chain, search_graph) for pipeline state.
@@ -167,22 +169,39 @@ class WebIntelAgent:
         for dead_id in graph.dead_ends():
             graph.prune_branch(dead_id)
 
-        # --- Tier 2: Browser search (only if still insufficient) ---
+        # --- Tier 2: Browser search (only if still insufficient and budget allows) ---
         if len(chain.geo_evidences) < 3 and self.settings.browser.enabled:
-            logger.info("Tier 1 insufficient, escalating to browser search")
-            browser_evidences = await self._browser_tier(queries[:3])
-            chain.add_many(browser_evidences)
-            logger.info("Tier 2 added {} evidences", len(browser_evidences))
+            # Latency guard: skip browser tier if we've used too much of the budget
+            skip_browser = False
+            if started_at_monotonic > 0 and self.settings.pipeline.max_total_latency_ms > 0:
+                import time as _time
+                elapsed_ms = (_time.monotonic() - started_at_monotonic) * 1000.0
+                if elapsed_ms >= self.settings.pipeline.max_total_latency_ms * 0.5:
+                    logger.info(
+                        "Skipping Tier 2 browser search: {:.0f}ms elapsed (>50% of budget)",
+                        elapsed_ms,
+                    )
+                    skip_browser = True
+
+            if not skip_browser:
+                logger.info("Tier 1 insufficient, escalating to browser search")
+                browser_evidences = await self._browser_tier(queries[:3])
+                chain.add_many(browser_evidences)
+                logger.info("Tier 2 added {} evidences", len(browser_evidences))
 
         return chain, graph
 
     async def _execute_pending_nodes(self, graph: SearchGraph, chain: EvidenceChain) -> None:
         """Execute all pending search nodes in the graph in parallel."""
         import time as _time
+        import hashlib
 
         pending = graph.pending_nodes()
         if not pending or not self._providers:
             return
+
+        # P1.8: Filter out queries matching failed patterns
+        pending = [n for n in pending if not graph.matches_failed_pattern(n.query)]
 
         async def _run_node(node):
             node.status = SearchNodeStatus.RUNNING
@@ -193,17 +212,35 @@ class WebIntelAgent:
                 node.evidence_count = len(evidences)
                 node.best_confidence = max((e.confidence for e in evidences), default=0.0)
                 node.duration_ms = round((_time.monotonic() - start) * 1000, 1)
+                # P2.6: Track cost effectiveness
+                if node.duration_ms > 0:
+                    node.cost_effectiveness = round(node.evidence_count / (node.duration_ms / 1000), 2)
+                # P1.8: Record failed pattern if no evidence
+                if node.evidence_count == 0:
+                    graph.record_failed_pattern(node.query)
                 return evidences
             except Exception as e:
                 node.status = SearchNodeStatus.FAILED
                 node.error = str(e)
                 node.duration_ms = round((_time.monotonic() - start) * 1000, 1)
+                node.retry_count += 1  # P1.7: Increment retry count
+                graph.record_failed_pattern(node.query)  # P1.8: Record failure
                 return []
 
         results = await asyncio.gather(*[_run_node(n) for n in pending], return_exceptions=True)
+        
+        # P2.1: Cross-provider deduplication using content hashes
+        seen_hashes: set[str] = set()
         for result in results:
             if isinstance(result, list):
-                chain.add_many(result)
+                for evidence in result:
+                    # Create hash from title + url + coordinates for dedup
+                    dedup_key = hashlib.sha256(
+                        f"{evidence.content}:{evidence.url}:{evidence.latitude}:{evidence.longitude}".encode()
+                    ).hexdigest()[:16]
+                    if dedup_key not in seen_hashes:
+                        seen_hashes.add(dedup_key)
+                        chain.add(evidence)
             elif isinstance(result, Exception):
                 logger.debug("Search node failed: {}", result)
 

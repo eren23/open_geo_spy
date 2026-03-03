@@ -24,6 +24,8 @@ class EvidenceSource(str, Enum):
     STREETCLIP = "streetclip"
     PIGEON = "pigeon"
     SERPER = "serper"
+    BRAVE = "brave"
+    SEARXNG = "searxng"
     GOOGLE_MAPS = "google_maps"
     OSM = "osm"
     BROWSER = "browser"
@@ -31,6 +33,7 @@ class EvidenceSource(str, Enum):
     USER_HINT = "user_hint"
     REASONING = "reasoning"
     VISUAL_MATCH = "visual_match"
+    MAPILLARY = "mapillary"
 
 
 @dataclass
@@ -51,11 +54,12 @@ class Evidence:
     metadata: dict = field(default_factory=dict)
     provenance: list[str] = field(default_factory=list)  # Agent/step path
     derived_from: list[str] = field(default_factory=list)  # Parent evidence hashes
+    is_negative: bool = False  # P2.4: Mark evidence that contradicts hypotheses
 
     def __post_init__(self):
         if not self.content_hash:
             self.content_hash = hashlib.sha256(
-                f"{self.source.value}:{self.content}".encode()
+                f"{self.source.value}:{self.content}:{self.is_negative}".encode()
             ).hexdigest()[:16]
 
         # Validate coordinates if provided
@@ -86,6 +90,7 @@ class Evidence:
             "metadata": self.metadata,
             "provenance": self.provenance,
             "derived_from": self.derived_from,
+            "is_negative": self.is_negative,
         }
 
     @classmethod
@@ -151,10 +156,18 @@ class EvidenceChain:
             if len(geo) < 2:
                 return 0.3 if geo else 0.0
 
-        coords = [(e.latitude, e.longitude) for e in geo]
+        # P2.5: Temporal weighting - newer evidence gets higher weight
+        now = datetime.now(timezone.utc)
+        max_age_seconds = 3600  # 1 hour max age for weighting
+        
+        weighted_coords = []
+        for e in geo:
+            age_seconds = (now - e.timestamp).total_seconds()
+            recency_weight = max(0.5, 1.0 - (age_seconds / max_age_seconds) * 0.5)
+            weighted_coords.append((e.latitude, e.longitude, e.confidence * recency_weight))
+        
         from src.utils.geo_math import geographic_spread
-
-        spread = geographic_spread(coords)
+        spread = geographic_spread([(c[0], c[1]) for c in weighted_coords])
 
         if scorer:
             geo_agreement = scorer.geo_agreement_score(spread)
@@ -169,6 +182,12 @@ class EvidenceChain:
             else:
                 geo_agreement = 0.2
 
+        # P2.4: Reduce confidence if negative evidence present
+        negative_count = sum(1 for e in self.evidences if e.is_negative)
+        if negative_count > 0:
+            negative_penalty = min(0.3, negative_count * 0.1)  # Cap at 0.3 penalty
+            geo_agreement = max(0.0, geo_agreement - negative_penalty)
+
         countries = self.country_predictions
         if countries:
             from src.utils.geo_math import country_level_agreement
@@ -179,6 +198,28 @@ class EvidenceChain:
             return 0.6 * geo_agreement + 0.4 * country_agree
 
         return geo_agreement
+
+    def negative_evidences(self) -> list[Evidence]:
+        """Get evidences marked as negative/contradicting (P2.4)."""
+        return [e for e in self.evidences if e.is_negative]
+
+    def recency_weighted_confidence(self) -> float:
+        """Get average confidence weighted by recency (P2.5)."""
+        if not self.evidences:
+            return 0.0
+        
+        now = datetime.now(timezone.utc)
+        max_age_seconds = 3600
+        
+        weighted_sum = 0.0
+        weight_sum = 0.0
+        for e in self.evidences:
+            age_seconds = (now - e.timestamp).total_seconds()
+            recency_weight = max(0.5, 1.0 - (age_seconds / max_age_seconds) * 0.5)
+            weighted_sum += e.confidence * recency_weight
+            weight_sum += recency_weight
+        
+        return weighted_sum / weight_sum if weight_sum > 0 else 0.0
 
     def by_source(self, source: EvidenceSource) -> list[Evidence]:
         """Filter evidences by source."""

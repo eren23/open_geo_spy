@@ -89,8 +89,12 @@ class GeoLocatorOrchestrator:
         image_path: str,
         location_hint: str | None = None,
         session_id: str | None = None,
+        quality: str = "balanced",
     ) -> PipelineState:
         sid = session_id or str(uuid.uuid4())
+        quality = quality.lower().strip() if quality else "balanced"
+        if quality not in {"fast", "balanced", "max"}:
+            quality = "balanced"
 
         # Create trace recorder for this pipeline run
         try:
@@ -114,6 +118,7 @@ class GeoLocatorOrchestrator:
             "image_path": image_path,
             "location_hint": location_hint,
             "session_id": sid,
+            "quality": quality,
             "evidences": [],
             "metadata": {},
             "features": {},
@@ -126,9 +131,19 @@ class GeoLocatorOrchestrator:
             "max_iterations": 2,
             "weak_evidence_areas": [],
             "should_refine": False,
+            "early_exit": False,
+            "skip_full_verification": quality == "fast",
+            "fast_path_reason": "quality=fast" if quality == "fast" else None,
             "messages": [],
             "step_results": [],
             "errors": [],
+            "started_at_monotonic": time.monotonic(),
+            "execution_policy": {
+                "quality": quality,
+                "fast_path_enabled": self.settings.pipeline.fast_path_enabled,
+                "max_total_latency_ms": self.settings.pipeline.max_total_latency_ms,
+                "max_llm_calls": self.settings.pipeline.max_llm_calls,
+            },
             "trace_recorder": recorder,
             "_base_llm_client": base_llm_client,
         }
@@ -137,13 +152,14 @@ class GeoLocatorOrchestrator:
         self,
         image_path: str,
         location_hint: str | None = None,
+        quality: str = "balanced",
     ) -> dict[str, Any]:
         """Run the full geolocation pipeline (blocking).
 
         Returns final result dict with location, confidence, evidence, reasoning.
         """
         start = time.monotonic()
-        state = self._initial_state(image_path, location_hint)
+        state = self._initial_state(image_path, location_hint, quality=quality)
 
         try:
             # Run graph to completion
@@ -172,6 +188,9 @@ class GeoLocatorOrchestrator:
                 "pipeline_progress": progress.to_dict(),
                 "total_evidence_count": progress.total_evidence,
                 "elapsed_ms": round(elapsed, 1),
+                "execution_policy": final_state.get("execution_policy", state.get("execution_policy", {})),
+                "quality": final_state.get("quality", quality),
+                "fast_path_reason": final_state.get("fast_path_reason"),
             }
 
             # Finalize trace recording
@@ -210,6 +229,7 @@ class GeoLocatorOrchestrator:
         image_path: str,
         location_hint: str | None = None,
         session_id: str | None = None,
+        quality: str = "balanced",
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Run pipeline with SSE progress streaming.
 
@@ -221,7 +241,7 @@ class GeoLocatorOrchestrator:
         """
         start = time.monotonic()
         sid = session_id or str(uuid.uuid4())
-        state = self._initial_state(image_path, location_hint, sid)
+        state = self._initial_state(image_path, location_hint, sid, quality=quality)
 
         try:
             # Use both "custom" and "values" stream modes to get SSE events
@@ -269,6 +289,9 @@ class GeoLocatorOrchestrator:
                     "session_id": sid,
                     "total_evidence_count": len(final_state.get("evidences", [])),
                     "elapsed_ms": round(elapsed, 1),
+                    "execution_policy": final_state.get("execution_policy", state.get("execution_policy", {})),
+                    "quality": final_state.get("quality", quality),
+                    "fast_path_reason": final_state.get("fast_path_reason"),
                 },
             }
 
@@ -285,6 +308,7 @@ class GeoLocatorOrchestrator:
         image_path: str,
         location_hint: str | None = None,
         session_id: str | None = None,
+        quality: str = "balanced",
     ) -> AsyncGenerator[dict[str, Any], None]:
         """V2 streaming: produces multi-candidate results + search graph.
 
@@ -293,7 +317,7 @@ class GeoLocatorOrchestrator:
         """
         start = time.monotonic()
         sid = session_id or str(uuid.uuid4())
-        state = self._initial_state(image_path, location_hint, sid)
+        state = self._initial_state(image_path, location_hint, sid, quality=quality)
 
         try:
             final_state = None
@@ -360,6 +384,9 @@ class GeoLocatorOrchestrator:
                     ),
                     "total_evidence_count": len(final_state.get("evidences", [])),
                     "elapsed_ms": round(elapsed, 1),
+                    "execution_policy": final_state.get("execution_policy", state.get("execution_policy", {})),
+                    "quality": final_state.get("quality", quality),
+                    "fast_path_reason": final_state.get("fast_path_reason"),
                 },
             }
 

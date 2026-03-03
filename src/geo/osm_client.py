@@ -15,6 +15,7 @@ from loguru import logger
 from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.confidence import calculate_osm_confidence, safe_coords
 from src.utils.geo_math import bounding_box, haversine_distance
 
 
@@ -46,9 +47,14 @@ class OSMClient:
         queries = self._build_queries(query_type, bbox_str)
         all_results = []
 
+        from src.utils.retry import execute_with_retry
+
         for query in queries:
             try:
-                result = await asyncio.to_thread(self._api.query, query)
+                result = await execute_with_retry(
+                    asyncio.to_thread, self._api.query, query,
+                    max_attempts=2, base_delay=1.0, max_delay=5.0,
+                )
                 for node in result.nodes:
                     tags = node.tags
                     name = tags.get("name", "")
@@ -82,7 +88,10 @@ class OSMClient:
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                transport=httpx.AsyncHTTPTransport(retries=2),
+            ) as client:
                 resp = await client.get(
                     "https://nominatim.openstreetmap.org/search",
                     params={"q": name, "format": "json", "limit": limit},
@@ -111,7 +120,10 @@ class OSMClient:
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                transport=httpx.AsyncHTTPTransport(retries=2),
+            ) as client:
                 resp = await client.get(
                     "https://nominatim.openstreetmap.org/reverse",
                     params={"lat": lat, "lon": lon, "format": "json"},
@@ -136,20 +148,30 @@ class OSMClient:
             return None
 
     def to_evidence(self, results: list[dict], search_context: str = "") -> list[Evidence]:
-        """Convert OSM results to Evidence objects."""
+        """Convert OSM results to Evidence objects with dynamic confidence."""
         evidences = []
         for r in results[:10]:
+            # Dynamic confidence based on OSM-specific signals
+            confidence = calculate_osm_confidence(
+                result=r,
+                distance_km=r.get("distance_km"),
+            )
+            
+            # Use safe coordinate extraction
+            lat, lon = safe_coords(r.get("lat"), r.get("lon"))
+            
             evidences.append(
                 Evidence(
                     source=EvidenceSource.OSM,
                     content=f"OSM POI: {r['name']} ({r['type']})",
-                    confidence=0.6,
-                    latitude=r["lat"],
-                    longitude=r["lon"],
+                    confidence=confidence,
+                    latitude=lat,
+                    longitude=lon,
                     metadata={
                         "distance_km": r.get("distance_km"),
                         "osm_type": r.get("type"),
                         "search_context": search_context,
+                        "importance": r.get("importance"),
                     },
                 )
             )

@@ -51,8 +51,8 @@ class BrowserSettings(BaseModel):
     enabled: bool = False
     api_key: str = ""
     pool_size: int = 3
-    request_delay_min: float = 2.0
-    request_delay_max: float = 8.0
+    request_delay_min: float = 0.5
+    request_delay_max: float = 2.0
 
     # Stealth
     enable_stealth: bool = True
@@ -146,6 +146,25 @@ class EvolutionSettings(BaseModel):
     auto_apply: bool = False  # If True, load tuned weights at startup
 
 
+class PipelineSettings(BaseModel):
+    """Pipeline execution policy and latency/cost budgets."""
+
+    fast_path_enabled: bool = True
+    max_total_latency_ms: int = 90_000
+    max_llm_calls: int = 12
+    skip_visual_verification_if_confident: bool = True
+    fast_path_confidence_threshold: float = 0.75
+    fast_path_agreement_threshold: float = 0.65
+
+    # Early-exit: skip expensive downstream steps when models already agree
+    early_exit_enabled: bool = True
+    early_exit_agreement_km: float = 50.0
+    early_exit_min_confidence: float = 0.6
+
+    # Refinement budget: max ms allowed for a single refinement loop iteration
+    max_refinement_latency_ms: int = 30_000
+
+
 # --- Main settings ---
 
 
@@ -176,6 +195,7 @@ class Settings(BaseSettings):
     calibration: CalibrationSettings = CalibrationSettings()
     tracing: TracingSettings = TracingSettings()
     evolution: EvolutionSettings = EvolutionSettings()
+    pipeline: PipelineSettings = PipelineSettings()
 
     model_config = {
         "env_prefix": "",

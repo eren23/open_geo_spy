@@ -37,6 +37,7 @@ class PipelineState(TypedDict, total=False):
     image_path: str
     location_hint: Optional[str]
     session_id: str
+    quality: str
 
     # --- Evidence (accumulated via reducer) ---
     evidences: Annotated[list[Evidence], _merge_evidence]
@@ -61,6 +62,9 @@ class PipelineState(TypedDict, total=False):
     max_iterations: int
     weak_evidence_areas: list[str]
     should_refine: bool
+    skip_full_verification: bool
+    fast_path_reason: Optional[str]
+    early_exit: bool
 
     # --- Chat history ---
     messages: Annotated[list[dict], operator.add]
@@ -74,3 +78,5 @@ class PipelineState(TypedDict, total=False):
     # --- Pipeline metadata ---
     step_results: Annotated[list[dict], operator.add]
     errors: Annotated[list[str], operator.add]
+    started_at_monotonic: float
+    execution_policy: dict[str, Any]

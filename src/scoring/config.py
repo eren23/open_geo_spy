@@ -82,7 +82,7 @@ class CandidateRankingWeights(BaseModel):
 class CountryPenalty(BaseModel):
     """Parameters for penalizing wrong-country candidates."""
 
-    consensus_threshold: float = 0.3
+    consensus_threshold: float = 0.6  # Only apply penalty when dominance > 60% (P2.3)
     penalty_factor: float = 0.7
     hint_vote_multiplier: int = 3
 
@@ -179,7 +179,7 @@ class RefinementThresholds(BaseModel):
 
     min_geographic_agreement: float = 0.5
     min_country_agreement: float = 0.6
-    min_top_confidence: float = 0.4
+    min_top_confidence: float = 0.5
     min_evidence_sources: int = 3
     max_iterations: int = 2
 

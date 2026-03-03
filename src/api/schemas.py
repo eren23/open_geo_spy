@@ -58,6 +58,9 @@ class LocateResponse(BaseModel):
     pipeline_progress: dict[str, Any] = {}
     total_evidence_count: int = 0
     elapsed_ms: float = 0.0
+    execution_policy: dict[str, Any] = {}
+    quality: str = "balanced"
+    fast_path_reason: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 
@@ -120,6 +123,9 @@ class LocateResponseV2(BaseModel):
     pipeline_progress: dict[str, Any] = {}
     total_evidence_count: int = 0
     elapsed_ms: float = 0.0
+    execution_policy: dict[str, Any] = {}
+    quality: str = "balanced"
+    fast_path_reason: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -149,7 +155,7 @@ class SessionResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.2.0"
+    version: str = "0.3.0"
     services: dict[str, bool] = {}
 
 
