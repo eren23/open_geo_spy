@@ -6,6 +6,8 @@ Replaces the old app.py with:
 - Environment-based CORS
 - Structured logging
 - Health check with dependency status
+- File upload validation (magic bytes + size)
+- Rate limiting middleware
 """
 
 from __future__ import annotations
@@ -14,11 +16,12 @@ import asyncio
 import json
 import os
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
@@ -34,6 +37,121 @@ from src.api.schemas import (
 )
 from src.config.settings import get_settings
 from src.utils.logging import setup_logger
+
+
+# --- File Validation ---
+
+# Magic bytes for common image formats
+IMAGE_SIGNATURES = {
+    b'\xff\xd8\xff': 'jpeg',           # JPEG
+    b'\x89PNG\r\n\x1a\n': 'png',       # PNG
+    b'GIF87a': 'gif',                  # GIF87a
+    b'GIF89a': 'gif',                  # GIF89a
+    b'RIFF': 'webp',                   # WebP (needs further check)
+    b'\x00\x00\x00\x1cftyp': 'heic',   # HEIC (variant)
+    b'\x00\x00\x00\x20ftyp': 'heic',   # HEIC (variant)
+    b'ftyp': 'mp4',                    # MP4/MOV (video)
+}
+
+ALLOWED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.mp4', '.mov'}
+
+
+def validate_image_file(file: UploadFile, max_size_mb: int = 50) -> tuple[bool, str]:
+    """Validate uploaded file by magic bytes and size.
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Check extension
+    if file.filename:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            return False, f"File type '{ext}' not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+    
+    # Check content type
+    content_type = file.content_type or ""
+    if not content_type.startswith(('image/', 'video/')):
+        return False, f"Invalid content type: {content_type}"
+    
+    return True, ""
+
+
+async def validate_file_contents(file: UploadFile, max_size_mb: int = 50) -> tuple[bool, str, bytes]:
+    """Read and validate file contents including magic bytes.
+    
+    Returns:
+        Tuple of (is_valid, error_message, file_bytes)
+    """
+    # Read file contents
+    contents = await file.read()
+    await file.seek(0)  # Reset for later reading
+    
+    # Check size
+    max_bytes = max_size_mb * 1024 * 1024
+    if len(contents) > max_bytes:
+        return False, f"File too large: {len(contents) / 1024 / 1024:.1f}MB (max: {max_size_mb}MB)", contents
+    
+    # Check magic bytes
+    header = contents[:16]
+    is_valid_image = False
+    
+    for sig, fmt in IMAGE_SIGNATURES.items():
+        if header.startswith(sig):
+            is_valid_image = True
+            break
+        # Special case: WebP has RIFF....WEBP
+        if sig == b'RIFF' and len(header) >= 12 and header[8:12] == b'WEBP':
+            is_valid_image = True
+            break
+        # Special case: ftyp for video containers
+        if b'ftyp' in header[:12]:
+            is_valid_image = True
+            break
+    
+    if not is_valid_image:
+        return False, "Invalid file format: file signature does not match image/video types", contents
+    
+    return True, "", contents
+
+
+# --- Rate Limiting ---
+
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window."""
+    
+    def __init__(self, requests_per_minute: int = 60):
+        self.rpm = requests_per_minute
+        self._requests: dict[str, list[float]] = {}
+    
+    def is_allowed(self, client_id: str) -> tuple[bool, int]:
+        """Check if request is allowed. Returns (allowed, remaining_requests)."""
+        now = time.time()
+        window_start = now - 60.0
+        
+        # Get or create request list
+        if client_id not in self._requests:
+            self._requests[client_id] = []
+        
+        # Clean old requests
+        self._requests[client_id] = [
+            t for t in self._requests[client_id] if t > window_start
+        ]
+        
+        remaining = max(0, self.rpm - len(self._requests[client_id]))
+        
+        if len(self._requests[client_id]) >= self.rpm:
+            return False, 0
+        
+        # Record this request
+        self._requests[client_id].append(now)
+        return True, remaining - 1
+    
+    def cleanup_stale(self, max_age: float = 120.0):
+        """Remove stale entries to prevent memory leak."""
+        cutoff = time.time() - max_age
+        stale = [k for k, v in self._requests.items() if not v or v[-1] < cutoff]
+        for k in stale:
+            del self._requests[k]
 
 
 # --- Lifespan ---
@@ -58,6 +176,9 @@ async def lifespan(app: FastAPI):
         else None
     )
     app.state.cache = cache
+
+    # Initialize rate limiter
+    app.state.rate_limiter = RateLimiter(requests_per_minute=settings.api.rate_limit_rpm)
 
     # Initialize orchestrator
     app.state.orchestrator = GeoLocatorOrchestrator(settings, cache=cache)
@@ -136,9 +257,58 @@ def _register_routes(app: FastAPI):
                 "visual_verification": settings.ml.enable_visual_verification,
             },
         )
+    
+    @app.get("/api/health/deep", response_model=HealthResponse)
+    async def health_deep():
+        """Deep health check that actually pings external services."""
+        import httpx
+        
+        settings = app.state.settings
+        services = {
+            "llm": False,
+            "serper": False,
+            "browser": settings.browser.enabled,
+            "geoclip": settings.ml.enable_geoclip,
+            "streetclip": settings.ml.enable_streetclip,
+            "visual_verification": settings.ml.enable_visual_verification,
+        }
+        
+        # Quick LLM check
+        if settings.llm.api_key:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    # Just check if the API endpoint is reachable
+                    resp = await client.get(
+                        settings.llm.base_url.rstrip("/") + "/models",
+                        headers={"Authorization": f"Bearer {settings.llm.api_key[:10]}..."},
+                    )
+                    services["llm"] = resp.status_code in (200, 401, 403)
+            except Exception:
+                services["llm"] = False
+        
+        # Serper check
+        if settings.geo.serper_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.post(
+                        "https://google.serper.dev/search",
+                        headers={"X-API-KEY": settings.geo.serper_api_key},
+                        json={"q": "test"},
+                    )
+                    services["serper"] = resp.status_code == 200
+            except Exception:
+                services["serper"] = False
+        
+        all_healthy = all(services.values())
+        return HealthResponse(
+            status="ok" if all_healthy else "degraded",
+            version="0.3.0",
+            services=services,
+        )
 
     @app.post("/api/locate", response_model=LocateResponse)
     async def locate(
+        request: Request,
         file: UploadFile = File(...),
         location_hint: str | None = Form(None),
         quality: str = Form("fast"),
@@ -154,17 +324,43 @@ def _register_routes(app: FastAPI):
         Returns location with confidence, evidence trail, and reasoning.
         """
         settings = app.state.settings
+        
+        # Rate limiting
+        client_id = request.client.host if request.client else "unknown"
+        rate_limiter: RateLimiter = app.state.rate_limiter
+        allowed, remaining = rate_limiter.is_allowed(client_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded. Please wait before making more requests.",
+                headers={"Retry-After": "60", "X-RateLimit-Remaining": str(remaining)},
+            )
+        
+        # Validate file type by extension
+        is_valid, error_msg = validate_image_file(file, settings.api.max_upload_size_mb)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Validate file contents (magic bytes + size)
+        is_valid, error_msg, contents = await validate_file_contents(
+            file, settings.api.max_upload_size_mb
+        )
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
         upload_dir = settings.image_dir
         os.makedirs(upload_dir, exist_ok=True)
 
-        # Save uploaded file
-        ext = os.path.splitext(file.filename or "image.jpg")[1] or ".jpg"
+        # Save uploaded file with sanitized extension
+        ext = os.path.splitext(file.filename or "image.jpg")[1].lower() or ".jpg"
+        if ext not in ALLOWED_EXTENSIONS:
+            ext = ".jpg"  # Safe default
         file_id = str(uuid.uuid4())
         file_path = os.path.join(upload_dir, f"{file_id}{ext}")
 
         try:
             with open(file_path, "wb") as f:
-                shutil.copyfileobj(file.file, f)
+                f.write(contents)
 
             orchestrator: GeoLocatorOrchestrator = app.state.orchestrator
             result = await orchestrator.locate(file_path, location_hint, quality=quality)
@@ -182,6 +378,7 @@ def _register_routes(app: FastAPI):
 
     @app.post("/api/locate/stream")
     async def locate_stream(
+        request: Request,
         file: UploadFile = File(...),
         location_hint: str | None = Form(None),
         quality: str = Form("fast"),
@@ -195,15 +392,40 @@ def _register_routes(app: FastAPI):
         - result: Final result
         """
         settings = app.state.settings
+        
+        # Rate limiting
+        client_id = request.client.host if request.client else "unknown"
+        rate_limiter: RateLimiter = app.state.rate_limiter
+        allowed, remaining = rate_limiter.is_allowed(client_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded.",
+                headers={"Retry-After": "60"},
+            )
+        
+        # Validate file
+        is_valid, error_msg = validate_image_file(file, settings.api.max_upload_size_mb)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        is_valid, error_msg, contents = await validate_file_contents(
+            file, settings.api.max_upload_size_mb
+        )
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
         upload_dir = settings.image_dir
         os.makedirs(upload_dir, exist_ok=True)
 
-        ext = os.path.splitext(file.filename or "image.jpg")[1] or ".jpg"
+        ext = os.path.splitext(file.filename or "image.jpg")[1].lower() or ".jpg"
+        if ext not in ALLOWED_EXTENSIONS:
+            ext = ".jpg"
         file_id = str(uuid.uuid4())
         file_path = os.path.join(upload_dir, f"{file_id}{ext}")
 
         with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            f.write(contents)
 
         async def event_generator() -> AsyncGenerator[dict, None]:
             try:

@@ -14,6 +14,7 @@ from loguru import logger
 from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.confidence import calculate_search_confidence, safe_coords
 from src.geo.provider_base import SearchProvider
 
 
@@ -104,15 +105,16 @@ class SerperClient(SearchProvider):
             return []
 
     def results_to_evidence(self, results: list[dict], query: str) -> list[Evidence]:
-        """Convert Serper results to Evidence objects."""
+        """Convert Serper results to Evidence objects with dynamic confidence."""
         evidences = []
-        for r in results:
+        for position, r in enumerate(results):
             # Extract location mentions from snippets
             title = r.get("title", "")
             snippet = r.get("snippet", "")
             link = r.get("link", "")
-            lat = r.get("latitude")
-            lon = r.get("longitude")
+            
+            # Use safe coordinate extraction with validation
+            lat, lon = safe_coords(r.get("latitude"), r.get("longitude"))
             address = r.get("address")
 
             content = f"Search result for '{query}': {title}"
@@ -121,15 +123,23 @@ class SerperClient(SearchProvider):
             if address:
                 content += f" (Address: {address})"
 
+            # Dynamic confidence based on result quality
+            confidence = calculate_search_confidence(
+                result=r,
+                query=query,
+                base_confidence=0.35,  # Serper base confidence
+                position=position,
+            )
+
             evidences.append(
                 Evidence(
                     source=EvidenceSource.SERPER,
                     content=content,
-                    confidence=0.5,
-                    latitude=float(lat) if lat else None,
-                    longitude=float(lon) if lon else None,
+                    confidence=confidence,
+                    latitude=lat,
+                    longitude=lon,
                     url=link,
-                    metadata={"query": query, "title": title},
+                    metadata={"query": query, "title": title, "position": position},
                 )
             )
         return evidences

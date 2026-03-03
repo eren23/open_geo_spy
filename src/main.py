@@ -1,23 +1,51 @@
-from image_analysis import ImageAnalyzer, MetadataExtractor
-from image_analysis.visual_search import VisualSearchEngine
-from geo_data import GeoDataInterface
-from reasoning import LocationResolver
-from config import CONFIG
-import os
+"""Legacy geolocation entry point.
+
+This module provides a simple CLI interface for geolocation.
+For production use, prefer the API server (src.api.app) or the
+orchestrator (src.agents.orchestrator).
+"""
+
+from __future__ import annotations
+
 import asyncio
-from PIL import Image
-from models.osv5m_predictor import OSV5MPredictor
+import os
 import re
-from typing import Dict, Optional
+from typing import Optional
+
+from PIL import Image
+
+from src.config.settings import get_settings
+from src.image_analysis.analyzer import ImageAnalyzer
+from src.image_analysis.metadata_extractor import MetadataExtractor
+from src.image_analysis.visual_search import VisualSearchEngine
+from src.geo_data.geo_interface import GeoDataInterface
+from src.reasoning.location_resolver import LocationResolver
+from src.models.osv5m_predictor import OSV5MPredictor
+
+# Legacy config compatibility
+CONFIG = get_settings()
 
 
 class GeoLocator:
+    """Legacy geolocation class - prefer GeoLocatorOrchestrator for new code."""
+    
     def __init__(self):
+        settings = get_settings()
         self.metadata_extractor = MetadataExtractor()
-        self.image_analyzer = ImageAnalyzer(CONFIG.OPENROUTER_API_KEY, CONFIG.APP_NAME, CONFIG.APP_URL)
-        self.visual_search = VisualSearchEngine(google_api_key=CONFIG.GOOGLE_API_KEY, bing_api_key=CONFIG.BING_API_KEY)
-        self.geo_interface = GeoDataInterface(geonames_username=CONFIG.GEONAMES_USERNAME)
-        self.location_resolver = LocationResolver(CONFIG.OPENROUTER_API_KEY)
+        # Note: ImageAnalyzer signature may differ - this is legacy code
+        self.image_analyzer = ImageAnalyzer(
+            api_key=settings.llm.api_key,
+            app_name=settings.app_name,
+            app_url="https://opengeo.local",
+        )
+        self.visual_search = VisualSearchEngine(
+            google_api_key=getattr(settings.geo, 'google_api_key', None),
+            bing_api_key=getattr(settings.geo, 'bing_api_key', None),
+        )
+        self.geo_interface = GeoDataInterface(
+            geonames_username=settings.geo.geonames_username,
+        )
+        self.location_resolver = LocationResolver(api_key=settings.llm.api_key)
         self.osv5m_predictor = OSV5MPredictor()
 
     async def process_image(self, image_path: str, location_hint: str = None):

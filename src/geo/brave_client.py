@@ -10,6 +10,7 @@ from loguru import logger
 from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
+from src.geo.confidence import calculate_search_confidence, safe_coords
 from src.geo.provider_base import SearchProvider
 
 
@@ -86,9 +87,9 @@ class BraveClient(SearchProvider):
             return []
 
     def results_to_evidence(self, results: list[dict], query: str) -> list[Evidence]:
-        """Convert Brave results to Evidence objects."""
+        """Convert Brave results to Evidence objects with dynamic confidence."""
         evidences = []
-        for r in results:
+        for position, r in enumerate(results):
             title = r.get("title", "")
             snippet = r.get("snippet", r.get("description", ""))
             link = r.get("link", r.get("url", ""))
@@ -97,13 +98,21 @@ class BraveClient(SearchProvider):
             if snippet:
                 content += f" - {snippet[:200]}"
 
+            # Dynamic confidence based on result quality
+            confidence = calculate_search_confidence(
+                result=r,
+                query=query,
+                base_confidence=0.32,  # Slightly lower than Serper (less geo-specific)
+                position=position,
+            )
+
             evidences.append(
                 Evidence(
-                    source=EvidenceSource.SERPER,  # Re-use source for web searches
+                    source=EvidenceSource.BRAVE,  # Fixed: use correct source
                     content=content,
-                    confidence=0.5,
+                    confidence=confidence,
                     url=link,
-                    metadata={"query": query, "provider": "brave", "title": title},
+                    metadata={"query": query, "provider": "brave", "title": title, "position": position},
                 )
             )
         return evidences

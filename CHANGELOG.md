@@ -4,6 +4,44 @@ All notable changes to OpenGeoSpy will be documented in this file.
 
 ---
 
+## [0.3.1] — 2026-03-02
+
+### Search Quality Improvements
+
+This release implements all 15 items from the Search Quality Improvements roadmap.
+
+#### P0 - Critical Fixes
+- **Dynamic confidence scoring**: All search providers now use `calculate_search_confidence()` with query match boosts, coordinate presence, address detection, and position decay (was already implemented in `src/geo/confidence.py`)
+- **Source attribution fix**: Brave search correctly uses `EvidenceSource.BRAVE` enum (was already fixed)
+
+#### P1 - High Priority
+- **Smarter query templates**: `QueryExpander` builds targeted queries using business names, streets, and landmarks from evidence context
+- **Context compression**: Smart evidence compression prioritizes countries, cities, coordinates, and landmarks for LLM prompts
+- **Country-to-language mapping**: Translation queries auto-detect target language from country (supports 25+ languages)
+- **DBSCAN clustering**: Replaced O(n²) iterative clustering with sklearn's DBSCAN using haversine metric for proper geographic clustering
+- **Smarter pruning**: Search nodes get retry counters; pruning only after N failed attempts (configurable `max_retries`)
+- **Failed node tracking**: Search graph records failed query patterns to avoid similar queries in future expansions
+
+#### P2 - Medium Priority
+- **Cross-provider deduplication**: Hash-based deduplication across Serper, Brave, and SearXNG to prevent duplicate evidence
+- **Coordinate validation**: `safe_coords()` helper validates lat/lon bounds before use
+- **Country consensus fix**: Consensus threshold raised from 30% to 60% to prevent arbitrary dominant country on 50/50 splits
+- **Negative evidence handling**: New `is_negative` field on Evidence; confidence penalty applied when contradictions found
+- **Temporal weighting**: Newer evidence from refinement gets higher weight via recency-weighted confidence
+- **Performance tracking**: `cost_effectiveness` field on SearchNode tracks evidence count per second
+- **Geolocation reranker**: New `GeolocationReranker` class prioritizes results with coordinates, addresses, and location keywords
+
+### Files Changed
+- `src/scoring/config.py` — Country consensus threshold raised to 0.6
+- `src/search/graph.py` — Added `retry_count`, `cost_effectiveness`, `failed_patterns` tracking
+- `src/agents/web_intel_agent.py` — Cross-provider deduplication, failed pattern filtering
+- `src/evidence/chain.py` — Negative evidence support, temporal weighting
+- `src/agents/reasoning_agent.py` — DBSCAN clustering with haversine metric
+- `src/geo/reranker.py` — **NEW** Geolocation reranker for search results
+- `docs/SEARCH_QUALITY_IMPROVEMENTS.md` — All 15 items marked complete
+
+---
+
 ## [0.3.0] — 2026-03-01
 
 ### Grounding-Based Scoring Architecture

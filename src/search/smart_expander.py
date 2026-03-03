@@ -1,6 +1,6 @@
 """LLM-powered smart query expansion (Phase 2.2).
 
-Replaces the heuristic expander with 6 expansion strategies:
+Uses LLM to generate intelligent expansion queries with 6 strategies:
 local language translation, synonyms, nearby landmarks,
 reverse search, more specific, broader.
 """
@@ -55,6 +55,25 @@ class SmartQueryExpander:
         self.client = client
         self.model = model
 
+    def _compress_evidence(self, evidence_chain: EvidenceChain, max_items: int = 5) -> str:
+        """Compress evidence to essential keywords for token efficiency (P1.1)."""
+        top = evidence_chain.top_evidence(max_items)
+        parts = []
+        for e in top:
+            # Extract just location names and key signals
+            keywords = []
+            if e.country:
+                keywords.append(e.country)
+            if e.city:
+                keywords.append(e.city)
+            if e.metadata.get("landmark"):
+                keywords.append(e.metadata["landmark"])
+            if e.metadata.get("type"):
+                keywords.append(e.metadata["type"])
+            if keywords:
+                parts.append(f"[{e.source.value}:{','.join(keywords)}:{e.confidence:.1f}]")
+        return " ".join(parts) or "No compressed evidence"
+
     async def suggest(
         self,
         graph: SearchGraph,
@@ -73,13 +92,15 @@ class SmartQueryExpander:
 
         # Pick the best parent node to expand
         parent = max(productive, key=lambda n: n.best_confidence)
-        summary = evidence_chain.summary()
+
+        # Use compressed evidence for token efficiency (P1.1)
+        compressed = self._compress_evidence(evidence_chain)
 
         prompt = EXPANSION_PROMPT.format(
             parent_query=parent.query,
             evidence_count=parent.evidence_count,
             best_confidence=parent.best_confidence,
-            evidence_summary=json.dumps(summary, default=str)[:500],
+            evidence_summary=compressed,
             weaknesses=", ".join(weak_areas) if weak_areas else "none identified",
         )
 

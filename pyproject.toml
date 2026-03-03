@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-geo-spy"
-version = "0.3.0"
+version = "0.3.1"
 description = "Production-grade multi-agent geolocation system"
 readme = "README.md"
 requires-python = ">=3.11"

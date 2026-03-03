@@ -10,11 +10,14 @@ from __future__ import annotations
 import asyncio
 import heapq
 import json
+import math
 import re
 from typing import Any
 
+import numpy as np
 from loguru import logger
 from openai import AsyncOpenAI
+from sklearn.cluster import DBSCAN
 
 from src.config.settings import Settings, get_scoring_config
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
@@ -367,34 +370,83 @@ class ReasoningAgent:
         evidences: list[Evidence],
         eps_km: float = 50,
     ) -> list[list[Evidence]]:
-        """Simple iterative clustering by haversine distance."""
-        from src.utils.geo_math import haversine_distance
+        """Cluster evidences by geographic proximity using DBSCAN (P1.4).
 
-        clusters: list[list[Evidence]] = []
-        assigned = [False] * len(evidences)
+        Replaces O(n²) iterative clustering with sklearn's DBSCAN using
+        haversine distance for proper geographic clustering.
+        """
+        if len(evidences) < 2:
+            return [[e] for e in evidences] if evidences else []
 
-        for i, e in enumerate(evidences):
-            if assigned[i]:
-                continue
-            cluster = [e]
-            assigned[i] = True
+        # Extract coordinates as radians for haversine metric
+        coords = []
+        valid_evidences = []
+        for e in evidences:
+            if e.latitude is not None and e.longitude is not None:
+                import math
+                coords.append([
+                    math.radians(e.latitude),
+                    math.radians(e.longitude),
+                ])
+                valid_evidences.append(e)
 
-            for j in range(i + 1, len(evidences)):
-                if assigned[j]:
+        if len(coords) < 2:
+            return [valid_evidences] if valid_evidences else []
+
+        # Convert eps_km to radians for haversine
+        eps_rad = eps_km / 6371.0  # Earth radius in km
+
+        try:
+            clustering = DBSCAN(
+                eps=eps_rad,
+                min_samples=1,
+                metric="haversine",
+            ).fit(coords)
+            labels = clustering.labels_
+
+            # Group evidences by cluster label
+            clusters_dict: dict[int, list[Evidence]] = {}
+            for label, evidence in zip(labels, valid_evidences):
+                if label not in clusters_dict:
+                    clusters_dict[label] = []
+                clusters_dict[label].append(evidence)
+
+            # Sort clusters by size descending
+            clusters = sorted(clusters_dict.values(), key=len, reverse=True)
+            return clusters
+
+        except Exception:
+            # Fallback to simple clustering if DBSCAN fails
+            from src.utils.geo_math import haversine_distance
+
+            clusters: list[list[Evidence]] = []
+            assigned = [False] * len(evidences)
+
+            for i, e in enumerate(evidences):
+                if assigned[i]:
                     continue
-                dist = haversine_distance(
-                    e.latitude, e.longitude,
-                    evidences[j].latitude, evidences[j].longitude,
-                )
-                if dist < eps_km:
-                    cluster.append(evidences[j])
-                    assigned[j] = True
+                cluster = [e]
+                assigned[i] = True
 
-            clusters.append(cluster)
+                for j in range(i + 1, len(evidences)):
+                    if assigned[j]:
+                        continue
+                    if e.latitude is None or e.longitude is None:
+                        continue
+                    if evidences[j].latitude is None or evidences[j].longitude is None:
+                        continue
+                    dist = haversine_distance(
+                        e.latitude, e.longitude,
+                        evidences[j].latitude, evidences[j].longitude,
+                    )
+                    if dist < eps_km:
+                        cluster.append(evidences[j])
+                        assigned[j] = True
 
-        # Sort clusters by size descending
-        clusters.sort(key=len, reverse=True)
-        return clusters
+                clusters.append(cluster)
+
+            clusters.sort(key=len, reverse=True)
+            return clusters
 
     def _rank_candidates(
         self,

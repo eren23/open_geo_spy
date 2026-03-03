@@ -47,6 +47,8 @@ class SearchNode:
     duration_ms: float = 0.0
     language: str = "en"
     error: Optional[str] = None
+    retry_count: int = 0  # P1.7: Track retries for smarter pruning
+    cost_effectiveness: float = 0.0  # P2.6: evidence_count / duration_ms
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +63,8 @@ class SearchNode:
             "duration_ms": self.duration_ms,
             "language": self.language,
             "error": self.error,
+            "retry_count": self.retry_count,
+            "cost_effectiveness": self.cost_effectiveness,
         }
 
 
@@ -87,6 +91,8 @@ class SearchGraph:
     nodes: dict[str, SearchNode] = field(default_factory=dict)
     edges: list[SearchEdge] = field(default_factory=list)
     root_ids: list[str] = field(default_factory=list)
+    failed_patterns: list[str] = field(default_factory=list)  # P1.8: Track failed query patterns
+    max_retries: int = 2  # P1.7: Max retries before pruning
 
     def add_node(
         self,
@@ -150,10 +156,21 @@ class SearchGraph:
         return productive
 
     def dead_ends(self) -> list[str]:
-        """Return node IDs that completed with zero evidence."""
+        """Return node IDs that completed with zero evidence and exceeded retries."""
         return [
             n.id for n in self.nodes.values()
-            if n.status == SearchNodeStatus.COMPLETED and n.evidence_count == 0
+            if n.status == SearchNodeStatus.COMPLETED 
+            and n.evidence_count == 0 
+            and n.retry_count >= self.max_retries  # P1.7: Only prune after N retries
+        ]
+
+    def retryable_dead_ends(self) -> list[str]:
+        """Return node IDs that completed with zero evidence but can be retried (P1.7)."""
+        return [
+            n.id for n in self.nodes.values()
+            if n.status == SearchNodeStatus.COMPLETED 
+            and n.evidence_count == 0 
+            and n.retry_count < self.max_retries
         ]
 
     def prune_branch(self, node_id: str) -> None:
@@ -162,6 +179,20 @@ class SearchGraph:
             self.nodes[node_id].status = SearchNodeStatus.PRUNED
         for child in self.get_children(node_id):
             self.prune_branch(child.id)
+
+    def record_failed_pattern(self, query: str) -> None:
+        """Record a failed query pattern to avoid similar queries (P1.8)."""
+        # Extract pattern: first few words normalized
+        words = query.lower().split()[:4]
+        pattern = " ".join(words)
+        if pattern and pattern not in self.failed_patterns:
+            self.failed_patterns.append(pattern)
+
+    def matches_failed_pattern(self, query: str) -> bool:
+        """Check if query matches a known failed pattern (P1.8)."""
+        words = query.lower().split()[:4]
+        pattern = " ".join(words)
+        return pattern in self.failed_patterns
 
     def suggest_expansions(self, max_suggestions: int = 5) -> list[dict]:
         """Suggest new queries based on graph analysis.
