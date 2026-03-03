@@ -46,10 +46,13 @@ async def extract_text(
     Returns dict with keys: street_signs, business_names, building_info,
     license_plates, informational, languages.
     """
+    from src.utils.retry import execute_with_retry
+
     try:
         image_url = _encode_image(image_path)
 
-        resp = await client.chat.completions.create(
+        resp = await execute_with_retry(
+            client.chat.completions.create,
             model=model,
             messages=[
                 {
@@ -62,6 +65,8 @@ async def extract_text(
             ],
             temperature=0.0,
             max_tokens=2000,
+            max_attempts=2,
+            base_delay=2.0,
         )
 
         return _parse_ocr_response(resp.choices[0].message.content)

@@ -23,7 +23,10 @@ class SearXNGClient(SearchProvider):
     ):
         self.base_url = base_url.rstrip("/")
         self._cache = cache
-        self._client = httpx.AsyncClient(timeout=15.0)
+        self._client = httpx.AsyncClient(
+            timeout=15.0,
+            transport=httpx.AsyncHTTPTransport(retries=2),
+        )
 
     @property
     def name(self) -> str:

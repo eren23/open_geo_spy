@@ -70,6 +70,46 @@ def _emit_evidence_events(
     })
 
 
+def _should_skip_candidate_verification(
+    state: PipelineState,
+    evidence_chain: EvidenceChain,
+    settings: Settings,
+) -> tuple[bool, str | None]:
+    """Policy gate for expensive visual candidate verification."""
+    quality = (state.get("quality") or "balanced").lower()
+    if quality == "fast":
+        return True, "quality=fast"
+    if quality == "max":
+        return False, None
+    if not settings.pipeline.fast_path_enabled:
+        return False, None
+
+    scorer = GeoScorer(get_scoring_config())
+    agreement = evidence_chain.agreement_score(scorer)
+    geo_confident = sum(
+        1 for e in evidence_chain.geo_evidences
+        if e.confidence >= settings.pipeline.fast_path_confidence_threshold
+    )
+    if (
+        agreement >= settings.pipeline.fast_path_agreement_threshold
+        and geo_confident >= 2
+    ):
+        return True, f"agreement={agreement:.2f},geo_confident={geo_confident}"
+
+    # Skip verification during refinement loops (already verified in first pass)
+    iteration = state.get("iteration", 0)
+    if iteration > 0:
+        return True, f"refinement_loop_iteration={iteration}"
+
+    started = state.get("started_at_monotonic", 0.0) or 0.0
+    if started > 0 and settings.pipeline.max_total_latency_ms > 0:
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if elapsed_ms >= settings.pipeline.max_total_latency_ms * 0.6:
+            return True, f"latency_guard={elapsed_ms:.0f}ms"
+
+    return False, None
+
+
 # ---------------------------------------------------------------------------
 # Node: feature_extraction
 # ---------------------------------------------------------------------------
@@ -254,6 +294,7 @@ async def web_intelligence_node(
             features,
             ocr_result,
             weak_areas=state.get("weak_evidence_areas"),
+            started_at_monotonic=state.get("started_at_monotonic", 0.0) or 0.0,
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 
@@ -293,6 +334,85 @@ async def web_intelligence_node(
 
 
 # ---------------------------------------------------------------------------
+# Node: early_exit_check  (conditional – decides whether to skip expensive steps)
+# ---------------------------------------------------------------------------
+
+
+async def early_exit_check_node(
+    state: PipelineState,
+    writer: StreamWriter,
+) -> dict[str, Any]:
+    """Check if models agree well enough to skip candidate_verification + refinement.
+
+    When VLM Geo, GeoCLIP, and web evidence converge within a tight radius
+    with reasonable confidence, we can jump straight to reasoning and skip
+    the expensive candidate_verification and refinement loop entirely.
+    """
+    settings = get_settings()
+    if not settings.pipeline.early_exit_enabled:
+        return {"early_exit": False}
+
+    quality = (state.get("quality") or "balanced").lower()
+    if quality == "max":
+        return {"early_exit": False}
+
+    evidence_chain = _build_chain_from_state(state)
+    geo_evs = evidence_chain.geo_evidences
+    if len(geo_evs) < 2:
+        return {"early_exit": False}
+
+    # Check geographic spread: all geo evidence within threshold km
+    from src.utils.geo_math import haversine_distance
+
+    coords = [
+        (e.latitude, e.longitude)
+        for e in geo_evs
+        if e.latitude is not None and e.longitude is not None
+    ]
+    if len(coords) < 2:
+        return {"early_exit": False}
+
+    max_spread = 0.0
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            d = haversine_distance(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
+            max_spread = max(max_spread, d)
+
+    agreement_km = settings.pipeline.early_exit_agreement_km
+    min_confidence = settings.pipeline.early_exit_min_confidence
+
+    # Check country agreement
+    countries = evidence_chain.country_predictions
+    country_agree = True
+    if countries:
+        from src.utils.geo_math import country_level_agreement
+        country_agree = country_level_agreement(countries) >= 0.6
+
+    # Check average confidence
+    confidences = [e.confidence for e in geo_evs if e.confidence > 0]
+    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+
+    if max_spread <= agreement_km and country_agree and avg_conf >= min_confidence:
+        logger.info(
+            "Early exit: spread={:.1f}km, avg_conf={:.2f}, {} geo evidences",
+            max_spread, avg_conf, len(geo_evs),
+        )
+        writer({
+            "event": "early_exit",
+            "spread_km": round(max_spread, 1),
+            "avg_confidence": round(avg_conf, 3),
+            "geo_evidence_count": len(geo_evs),
+        })
+        return {
+            "early_exit": True,
+            "skip_full_verification": True,
+            "fast_path_reason": f"early_exit:spread={max_spread:.0f}km,conf={avg_conf:.2f}",
+        }
+
+    return {"early_exit": False}
+
+
+# ---------------------------------------------------------------------------
 # Node: candidate_verification
 # ---------------------------------------------------------------------------
 
@@ -315,25 +435,55 @@ async def candidate_verification_node(
     if settings is None:
         settings = get_settings()
 
-    agent = CandidateVerificationAgent(settings)
-
-    # Try to share StreetCLIP model from ML registry to avoid loading it twice
-    try:
-        from src.models.registry import ModelRegistry
-        for name, instance in dict(ModelRegistry._instances).items():
-            if "streetclip" in name.lower() and hasattr(instance, '_predictor'):
-                predictor = instance._predictor
-                if hasattr(predictor, 'model') and predictor.model is not None:
-                    if hasattr(agent, '_scorer') and agent._scorer is not None:
-                        agent._scorer.model = predictor.model
-                        agent._scorer.processor = predictor.processor
-                        logger.debug("Shared StreetCLIP model with verification agent")
-                    break
-    except Exception:
-        pass  # Fall back to loading independently
-
     try:
         evidence_chain = _build_chain_from_state(state)
+        skip_candidate_verification, reason = _should_skip_candidate_verification(
+            state, evidence_chain, settings,
+        )
+        if skip_candidate_verification:
+            duration = round((time.monotonic() - start) * 1000, 1)
+            if recorder:
+                recorder.record_step(
+                    "candidate_verification",
+                    "skipped",
+                    duration_ms=duration,
+                    evidence_count=len(evidence_chain.evidences),
+                )
+            writer({
+                "event": "step_complete",
+                "step": "candidate_verification",
+                "duration_ms": duration,
+                "evidence_count": len(evidence_chain.evidences),
+            })
+            return {
+                "skip_full_verification": True,
+                "fast_path_reason": reason or "candidate_verification_skipped",
+                "step_results": [{
+                    "name": "candidate_verification",
+                    "status": "skipped",
+                    "duration_ms": duration,
+                    "evidence_count": len(evidence_chain.evidences),
+                    "error": reason,
+                }],
+            }
+
+        agent = CandidateVerificationAgent(settings)
+
+        # Try to share StreetCLIP model from ML registry to avoid loading it twice
+        try:
+            from src.models.registry import ModelRegistry
+            for name, instance in dict(ModelRegistry._instances).items():
+                if "streetclip" in name.lower() and hasattr(instance, '_predictor'):
+                    predictor = instance._predictor
+                    if hasattr(predictor, 'model') and predictor.model is not None:
+                        if hasattr(agent, '_scorer') and agent._scorer is not None:
+                            agent._scorer.model = predictor.model
+                            agent._scorer.processor = predictor.processor
+                            logger.debug("Shared StreetCLIP model with verification agent")
+                        break
+        except Exception:
+            pass  # Fall back to loading independently
+
         features = state.get("features", {})
         ocr_result = state.get("ocr_result", {})
 
@@ -358,6 +508,7 @@ async def candidate_verification_node(
 
         return {
             "evidences": _chain_to_evidences(chain),
+            "skip_full_verification": False,
             "step_results": [{
                 "name": "candidate_verification",
                 "status": "completed",
@@ -407,8 +558,30 @@ async def reasoning_node(
         features = state.get("features", {})
 
         # Produce multi-candidate results and use the top one as primary
-        ranked = await agent.reason_multi_candidate(evidence_chain, features)
-        prediction = ranked[0] if ranked else await agent.reason(evidence_chain, features)
+        quality = (state.get("quality") or "balanced").lower()
+        skip_verification = bool(state.get("skip_full_verification", False))
+        if quality == "fast":
+            skip_verification = True
+        if (
+            settings.pipeline.skip_visual_verification_if_confident
+            and evidence_chain.agreement_score() >= settings.pipeline.fast_path_agreement_threshold
+        ):
+            skip_verification = True
+
+        recorder = state.get("trace_recorder")
+        if recorder and len(recorder.llm_calls) >= settings.pipeline.max_llm_calls:
+            skip_verification = True
+
+        ranked = await agent.reason_multi_candidate(
+            evidence_chain,
+            features,
+            skip_verification=skip_verification,
+        )
+        prediction = ranked[0] if ranked else await agent.reason(
+            evidence_chain,
+            features,
+            skip_verification=skip_verification,
+        )
         duration = round((time.monotonic() - start) * 1000, 1)
 
         # Emit grounding results from hierarchical resolver
@@ -449,6 +622,7 @@ async def reasoning_node(
         return {
             "prediction": prediction,
             "ranked_candidates": ranked,
+            "skip_full_verification": skip_verification,
             "step_results": [{
                 "name": "reasoning",
                 "status": "completed",
@@ -489,6 +663,41 @@ async def refinement_check_node(
     iteration = state.get("iteration", 0) + 1
     max_iter = state.get("max_iterations", thresholds.max_iterations)
     prediction = state.get("prediction", {})
+    quality = (state.get("quality") or "balanced").lower()
+    started = state.get("started_at_monotonic", 0.0) or 0.0
+
+    if quality == "fast":
+        return {"should_refine": False, "iteration": iteration}
+
+    if state.get("early_exit", False):
+        return {"should_refine": False, "iteration": iteration}
+
+    pipeline_settings = get_settings().pipeline
+    if started > 0 and pipeline_settings.max_total_latency_ms > 0:
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if elapsed_ms >= pipeline_settings.max_total_latency_ms:
+            return {
+                "should_refine": False,
+                "iteration": iteration,
+                "fast_path_reason": f"latency_budget_exceeded:{elapsed_ms:.0f}ms",
+            }
+        # Also check per-iteration refinement budget
+        if pipeline_settings.max_refinement_latency_ms > 0:
+            remaining_ms = pipeline_settings.max_total_latency_ms - elapsed_ms
+            if remaining_ms < pipeline_settings.max_refinement_latency_ms:
+                return {
+                    "should_refine": False,
+                    "iteration": iteration,
+                    "fast_path_reason": f"insufficient_budget_for_refinement:{remaining_ms:.0f}ms_remaining",
+                }
+
+    recorder = state.get("trace_recorder")
+    if recorder and len(recorder.llm_calls) >= pipeline_settings.max_llm_calls:
+        return {
+            "should_refine": False,
+            "iteration": iteration,
+            "fast_path_reason": f"llm_call_budget_exceeded:{len(recorder.llm_calls)}",
+        }
 
     # Never loop more than max_iterations
     if iteration > max_iter:

@@ -179,7 +179,7 @@ class RefinementThresholds(BaseModel):
 
     min_geographic_agreement: float = 0.5
     min_country_agreement: float = 0.6
-    min_top_confidence: float = 0.4
+    min_top_confidence: float = 0.5
     min_evidence_sources: int = 3
     max_iterations: int = 2
 

@@ -89,6 +89,7 @@ class WebIntelAgent:
         features: dict[str, Any] | None = None,
         ocr_result: dict[str, list[str]] | None = None,
         weak_areas: list[str] | None = None,
+        started_at_monotonic: float = 0.0,
     ) -> tuple[EvidenceChain, SearchGraph]:
         """Run tiered search based on available evidence.
 
@@ -97,6 +98,7 @@ class WebIntelAgent:
             features: Raw visual features dict
             ocr_result: Raw OCR results dict
             weak_areas: Weakness areas from refinement check (triggers targeted queries)
+            started_at_monotonic: Pipeline start time for latency budgeting
 
         Returns:
             Tuple of (evidence_chain, search_graph) for pipeline state.
@@ -167,12 +169,25 @@ class WebIntelAgent:
         for dead_id in graph.dead_ends():
             graph.prune_branch(dead_id)
 
-        # --- Tier 2: Browser search (only if still insufficient) ---
+        # --- Tier 2: Browser search (only if still insufficient and budget allows) ---
         if len(chain.geo_evidences) < 3 and self.settings.browser.enabled:
-            logger.info("Tier 1 insufficient, escalating to browser search")
-            browser_evidences = await self._browser_tier(queries[:3])
-            chain.add_many(browser_evidences)
-            logger.info("Tier 2 added {} evidences", len(browser_evidences))
+            # Latency guard: skip browser tier if we've used too much of the budget
+            skip_browser = False
+            if started_at_monotonic > 0 and self.settings.pipeline.max_total_latency_ms > 0:
+                import time as _time
+                elapsed_ms = (_time.monotonic() - started_at_monotonic) * 1000.0
+                if elapsed_ms >= self.settings.pipeline.max_total_latency_ms * 0.5:
+                    logger.info(
+                        "Skipping Tier 2 browser search: {:.0f}ms elapsed (>50% of budget)",
+                        elapsed_ms,
+                    )
+                    skip_browser = True
+
+            if not skip_browser:
+                logger.info("Tier 1 insufficient, escalating to browser search")
+                browser_evidences = await self._browser_tier(queries[:3])
+                chain.add_many(browser_evidences)
+                logger.info("Tier 2 added {} evidences", len(browser_evidences))
 
         return chain, graph
 

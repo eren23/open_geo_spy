@@ -28,7 +28,10 @@ async def _reverse_geocode_osm(lat: float, lon: float) -> dict[str, Any] | None:
     try:
         import httpx
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            transport=httpx.AsyncHTTPTransport(retries=2),
+        ) as client:
             resp = await client.get(
                 "https://nominatim.openstreetmap.org/reverse",
                 params={

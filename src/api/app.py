@@ -48,10 +48,14 @@ async def lifespan(app: FastAPI):
 
     # Initialize cache
     from src.cache import CacheStore
-    cache = CacheStore(
-        max_memory_entries=1000,
-        disk_path=os.path.join(settings.image_dir, ".cache"),
-        default_ttl=3600,
+    cache = (
+        CacheStore(
+            max_memory_entries=settings.cache.max_memory_entries,
+            disk_path=settings.cache.disk_path if settings.cache.backend == "disk" else None,
+            default_ttl=settings.cache.serper_ttl,
+        )
+        if settings.cache.enabled
+        else None
     )
     app.state.cache = cache
 
@@ -137,6 +141,7 @@ def _register_routes(app: FastAPI):
     async def locate(
         file: UploadFile = File(...),
         location_hint: str | None = Form(None),
+        quality: str = Form("fast"),
     ):
         """Analyze an image to determine its location.
 
@@ -162,7 +167,7 @@ def _register_routes(app: FastAPI):
                 shutil.copyfileobj(file.file, f)
 
             orchestrator: GeoLocatorOrchestrator = app.state.orchestrator
-            result = await orchestrator.locate(file_path, location_hint)
+            result = await orchestrator.locate(file_path, location_hint, quality=quality)
 
             return LocateResponse(**_normalize_result(result))
 
@@ -179,6 +184,7 @@ def _register_routes(app: FastAPI):
     async def locate_stream(
         file: UploadFile = File(...),
         location_hint: str | None = Form(None),
+        quality: str = Form("fast"),
     ):
         """SSE streaming version of locate.
 
@@ -202,7 +208,7 @@ def _register_routes(app: FastAPI):
         async def event_generator() -> AsyncGenerator[dict, None]:
             try:
                 orchestrator: GeoLocatorOrchestrator = app.state.orchestrator
-                async for event in orchestrator.locate_stream(file_path, location_hint):
+                async for event in orchestrator.locate_stream(file_path, location_hint, quality=quality):
                     if event.get("event") == "result":
                         # Normalize the final result
                         event["data"] = _normalize_result(event.get("data", {}))
@@ -220,6 +226,7 @@ def _register_routes(app: FastAPI):
     async def locate_stream_v2(
         file: UploadFile = File(...),
         location_hint: str | None = Form(None),
+        quality: str = Form("fast"),
     ):
         """V2 SSE streaming: multi-candidate results + session + search graph."""
         settings = app.state.settings
@@ -237,7 +244,7 @@ def _register_routes(app: FastAPI):
             try:
                 orchestrator: GeoLocatorOrchestrator = app.state.orchestrator
                 session_mgr = getattr(app.state, "session_manager", None)
-                async for event in orchestrator.locate_stream_v2(file_path, location_hint):
+                async for event in orchestrator.locate_stream_v2(file_path, location_hint, quality=quality):
                     if event.get("event") == "result":
                         raw_data = event.get("data", {})
 
@@ -398,6 +405,9 @@ def _normalize_result_v2(result: dict) -> dict:
     base["candidates"] = [_normalize_candidate(c, rank=i + 1) for i, c in enumerate(raw_candidates)]
     base["search_graph"] = result.get("search_graph")
     base["session_id"] = result.get("session_id")
+    base["execution_policy"] = result.get("execution_policy", {})
+    base["quality"] = result.get("quality", "balanced")
+    base["fast_path_reason"] = result.get("fast_path_reason")
     return base
 
 
@@ -437,6 +447,9 @@ def _normalize_result(result: dict) -> dict:
         "pipeline_progress": result.get("pipeline_progress", {}),
         "total_evidence_count": result.get("total_evidence_count", 0),
         "elapsed_ms": result.get("elapsed_ms", 0.0),
+        "execution_policy": result.get("execution_policy", {}),
+        "quality": result.get("quality", "balanced"),
+        "fast_path_reason": result.get("fast_path_reason"),
     }
 
 

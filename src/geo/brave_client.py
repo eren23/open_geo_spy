@@ -28,6 +28,7 @@ class BraveClient(SearchProvider):
                 "Accept-Encoding": "gzip",
                 "X-Subscription-Token": api_key,
             },
+            transport=httpx.AsyncHTTPTransport(retries=2),
         )
 
     @property

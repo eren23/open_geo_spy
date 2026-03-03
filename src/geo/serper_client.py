@@ -28,6 +28,7 @@ class SerperClient(SearchProvider):
         self._client = httpx.AsyncClient(
             timeout=15.0,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+            transport=httpx.AsyncHTTPTransport(retries=2),
         )
 
     @property
