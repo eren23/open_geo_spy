@@ -293,6 +293,7 @@ class ReasoningAgent:
                     top_country,
                     dominant_country,
                     country_consensus_strength,
+                    has_hint=bool(hint),
                 ),
                 "reasoning": f"Evidence cluster with {len(cluster_evidences)} data points",
                 "evidence_used": [e.content[:80] for e in cluster_evidences[:5]],
@@ -310,16 +311,33 @@ class ReasoningAgent:
                 c_country = (c.get("country") or "").lower()
                 c_city = (c.get("city") or "").lower()
                 c_name = (c.get("name") or "").lower()
-                if hint in c_country or hint in c_city or hint in c_name:
-                    c["confidence"] = self.scorer.hint_boost(c.get("confidence", 0))
+                
+                # Check for match at different levels
+                country_match = hint in c_country
+                city_match = hint in c_city
+                name_match = hint in c_name
+                
+                if country_match or city_match or name_match:
+                    # Strong boost for matching candidates
+                    strong_match = city_match or name_match
+                    c["confidence"] = self.scorer.hint_boost(
+                        c.get("confidence", 0), 
+                        strong_match=strong_match
+                    )
+                    c["hint_matched"] = True
                 else:
-                    c["confidence"] = self.scorer.hint_penalty(c.get("confidence", 0))
+                    # Heavy penalty for non-matching candidates
+                    c["confidence"] = self.scorer.strong_hint_country_penalty(
+                        c.get("confidence", 0)
+                    )
+                    c["hint_matched"] = False
 
         # Ranking uses capped trails; redistribution enriches output payload after ranking is final
         ranked = self._rank_candidates(
             candidates,
             dominant_country=dominant_country,
             country_consensus_strength=country_consensus_strength,
+            has_hint=bool(hint),  # Pass hint presence for country_match weighting
         )
 
         # Redistribute full pipeline evidence to candidates based on geographic proximity
@@ -453,8 +471,16 @@ class ReasoningAgent:
         candidates: list[dict],
         dominant_country: str | None = None,
         country_consensus_strength: float = 0.0,
+        has_hint: bool = False,
     ) -> list[dict]:
-        """Rank candidates by composite score with country consensus term."""
+        """Rank candidates by composite score with country consensus term.
+        
+        Args:
+            candidates: List of candidate dicts with location info
+            dominant_country: The dominant country from evidence voting
+            country_consensus_strength: Strength of country consensus (0-1)
+            has_hint: Whether a user hint was provided (increases country_match weight)
+        """
         evidence_count_cap = self.scorer.config.candidate_ranking.evidence_count_cap
         for i, c in enumerate(candidates):
             evidence_count = min(len(c.get("evidence_trail", [])), evidence_count_cap)
@@ -478,6 +504,7 @@ class ReasoningAgent:
                 source_diversity=len(source_set),
                 visual_match=visual_match,
                 country_match=country_match,
+                has_hint=has_hint,
             )
             c["_score"] = score
             c["source_diversity"] = len(source_set)
@@ -554,8 +581,32 @@ class ReasoningAgent:
         candidate_country: str | None,
         dominant_country: str | None,
         consensus_strength: float,
+        has_hint: bool = False,
     ) -> float:
-        """Penalize confidence when candidate country contradicts dominant consensus."""
+        """Penalize confidence when candidate country contradicts dominant consensus.
+        
+        Args:
+            confidence: Original confidence score
+            candidate_country: Country of the candidate
+            dominant_country: Dominant country from evidence voting
+            consensus_strength: Strength of the consensus (0-1)
+            has_hint: Whether a user hint was provided (uses lower threshold)
+        """
+        # Use lower consensus threshold when hint is present
+        if has_hint:
+            effective_threshold = min(
+                self.scorer.config.country_penalty.consensus_threshold_with_hint,
+                self.scorer.config.country_penalty.consensus_threshold
+            )
+            # Temporarily compute with lower threshold
+            if not dominant_country or not candidate_country:
+                return confidence
+            if candidate_country.lower() == dominant_country.lower():
+                return confidence
+            if consensus_strength < effective_threshold:
+                return confidence
+            return max(0.0, confidence * (1.0 - consensus_strength * self.scorer.config.country_penalty.penalty_factor))
+        
         return self.scorer.country_penalty(
             confidence, candidate_country, dominant_country, consensus_strength,
         )

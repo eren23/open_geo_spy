@@ -106,20 +106,34 @@ class WebIntelAgent:
         chain = EvidenceChain()
         graph = SearchGraph()
 
-        # Build search queries from evidence
-        queries = self._build_search_queries(evidence_chain, features, ocr_result)
+        # Build search queries from evidence (returns raw hint, not resolved country)
+        queries, raw_hint = self._build_search_queries(evidence_chain, features, ocr_result)
         if not queries:
             logger.warning("No search queries generated from evidence")
             return chain, graph
 
-        logger.info("Generated {} search queries", len(queries))
+        # Resolve hint to country ISO code using geocoding + LLM (async)
+        country_hint = None
+        if raw_hint:
+            from src.geo.country_codes import resolve_location_to_country
+            country_hint = await resolve_location_to_country(raw_hint, llm_client=self.client)
+            logger.info(
+                "Generated {} search queries (hint='{}' → country='{}')",
+                len(queries), raw_hint, country_hint or "unknown"
+            )
+        else:
+            logger.info("Generated {} search queries (no hint)", len(queries))
+
+        # Store hints in graph metadata
+        graph.metadata["raw_hint"] = raw_hint
+        graph.metadata["country_hint"] = country_hint
 
         # Seed the search graph with initial queries
         for query in queries[:5]:
             graph.add_node(query, intent=QueryIntent.INITIAL)
 
         # --- Tier 1: Execute pending graph nodes (parallel) ---
-        await self._execute_pending_nodes(graph, chain)
+        await self._execute_pending_nodes(graph, chain, country_hint=country_hint)
 
         # OSM search if we have coordinates from evidence
         cluster = evidence_chain.location_cluster()
@@ -150,7 +164,11 @@ class WebIntelAgent:
         # --- Tier 1.5: Smart query expansion if evidence is weak ---
         if len(chain.geo_evidences) < 3:
             try:
-                suggestions = await self._expander.suggest(graph, chain, weak_areas)
+                suggestions = await self._expander.suggest(
+                    graph, chain, weak_areas, 
+                    country_hint=country_hint,
+                    raw_hint=raw_hint,
+                )
                 for s in suggestions:
                     graph.add_node(
                         s["query"],
@@ -161,7 +179,7 @@ class WebIntelAgent:
                 # Execute the newly added pending nodes
                 if suggestions:
                     logger.info("Smart expander added {} queries, executing...", len(suggestions))
-                    await self._execute_pending_nodes(graph, chain)
+                    await self._execute_pending_nodes(graph, chain, country_hint=country_hint)
             except Exception as e:
                 logger.warning("Smart expansion failed: {}", e)
 
@@ -191,8 +209,19 @@ class WebIntelAgent:
 
         return chain, graph
 
-    async def _execute_pending_nodes(self, graph: SearchGraph, chain: EvidenceChain) -> None:
-        """Execute all pending search nodes in the graph in parallel."""
+    async def _execute_pending_nodes(
+        self, 
+        graph: SearchGraph, 
+        chain: EvidenceChain,
+        country_hint: str | None = None,
+    ) -> None:
+        """Execute all pending search nodes in the graph in parallel.
+        
+        Args:
+            graph: Search graph with nodes to execute
+            chain: Evidence chain to add results to
+            country_hint: ISO country code to prioritize results from
+        """
         import time as _time
         import hashlib
 
@@ -207,7 +236,7 @@ class WebIntelAgent:
             node.status = SearchNodeStatus.RUNNING
             start = _time.monotonic()
             try:
-                evidences = await self._provider_search(node.query)
+                evidences = await self._provider_search(node.query, country_hint=country_hint)
                 node.status = SearchNodeStatus.COMPLETED
                 node.evidence_count = len(evidences)
                 node.best_confidence = max((e.confidence for e in evidences), default=0.0)
@@ -249,19 +278,28 @@ class WebIntelAgent:
         evidence_chain: EvidenceChain,
         features: dict | None,
         ocr_result: dict | None,
-    ) -> list[str]:
+    ) -> tuple[list[str], str | None]:
         """Build optimized search queries from evidence.
 
         Adapted from enhanced_search.py query building pattern.
+        
+        Returns:
+            Tuple of (queries list, raw_hint or None)
+            Note: country_hint is resolved asynchronously in search() method
         """
         queries = []
+        raw_hint = None
 
         # Prioritize location hint from evidence chain
         hint = None
         for e in evidence_chain.evidences:
             if e.source == EvidenceSource.USER_HINT:
                 hint = e.metadata.get("hint", "").strip()
+                raw_hint = hint
                 break
+
+        # Note: Country resolution happens in search() method (async)
+        # This keeps query building synchronous
 
         if hint:
             # Prepend hint to top queries for higher relevance
@@ -328,21 +366,45 @@ class WebIntelAgent:
                 seen.add(q_lower)
                 unique.append(q)
 
-        return unique
+        return unique, raw_hint
 
-    async def _provider_search(self, query: str) -> list[Evidence]:
-        """Search across all configured providers in parallel (capped by semaphore)."""
+    async def _provider_search(
+        self, 
+        query: str,
+        country_hint: str | None = None,
+    ) -> list[Evidence]:
+        """Search across all configured providers in parallel (capped by semaphore).
+        
+        Args:
+            query: Search query string
+            country_hint: ISO country code to prioritize results from
+        """
         if not self._providers:
             return []
 
         async def _search_one(provider: SearchProvider) -> list[Evidence]:
             async with self._api_semaphore:
-                results = await provider.search(query, num_results=5)
+                # Pass country_hint to providers that support it
+                if hasattr(provider, 'search'):
+                    import inspect
+                    sig = inspect.signature(provider.search)
+                    if 'country_hint' in sig.parameters:
+                        results = await provider.search(query, num_results=5, country_hint=country_hint)
+                    else:
+                        results = await provider.search(query, num_results=5)
+                else:
+                    results = []
+                    
                 evidences = provider.results_to_evidence(results, query)
 
                 # Serper-specific: also try places search for geo data
                 if hasattr(provider, "search_places"):
-                    places = await provider.search_places(query)
+                    import inspect
+                    sig = inspect.signature(provider.search_places)
+                    if 'country_hint' in sig.parameters:
+                        places = await provider.search_places(query, country_hint=country_hint)
+                    else:
+                        places = await provider.search_places(query)
                     evidences.extend(provider.results_to_evidence(places, query))
 
                 return evidences

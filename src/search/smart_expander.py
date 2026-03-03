@@ -31,14 +31,19 @@ Produced {evidence_count} evidence items with best confidence {best_confidence:.
 ## Weaknesses to address
 {weaknesses}
 
+## IMPORTANT: Geographic Constraint
+{geo_constraint}
+
 ## Strategies to use
 Generate queries using these strategies (pick the most relevant 3-5):
 1. LOCAL_LANGUAGE: Translate key terms into the likely local language
 2. SYNONYMS: Use alternative names or spellings for places/landmarks
 3. LANDMARKS: Search for nearby landmarks or distinctive features
 4. MORE_SPECIFIC: Add street names, neighborhoods, or building numbers
-5. BROADER: Expand to region or country level
+5. BROADER: Expand to region or country level (STAY within the geographic constraint if specified)
 6. VERIFY: Search for evidence that confirms or denies the current hypothesis
+
+CRITICAL: If a geographic constraint (country/region) is specified above, ALL queries MUST stay within that region. Do NOT suggest queries that could return results from other countries.
 
 Return a JSON array of query objects:
 [
@@ -79,8 +84,18 @@ class SmartQueryExpander:
         graph: SearchGraph,
         evidence_chain: EvidenceChain,
         weak_areas: list[str] | None = None,
+        country_hint: str | None = None,
+        raw_hint: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Generate smart expansion queries using LLM."""
+        """Generate smart expansion queries using LLM.
+        
+        Args:
+            graph: Search graph with node history
+            evidence_chain: Evidence from prior agents
+            weak_areas: Identified weakness areas from refinement
+            country_hint: ISO country code to constrain searches to
+            raw_hint: Original user hint (for better context in prompt)
+        """
         # Find productive completed nodes to expand from
         productive = [
             n for n in graph.nodes.values()
@@ -96,12 +111,35 @@ class SmartQueryExpander:
         # Use compressed evidence for token efficiency (P1.1)
         compressed = self._compress_evidence(evidence_chain)
 
+        # Build geographic constraint text
+        if raw_hint and country_hint:
+            geo_constraint = (
+                f"The user specified this location: '{raw_hint}' "
+                f"(resolved to country: {country_hint}). "
+                f"ALL queries MUST be restricted to this geographic area. "
+                f"Do NOT generate queries that could return results from other countries/regions."
+            )
+        elif raw_hint:
+            geo_constraint = (
+                f"The user specified this location: '{raw_hint}'. "
+                f"ALL queries MUST be restricted to this geographic area. "
+                f"Do NOT generate queries that could return results from other countries/regions."
+            )
+        elif country_hint:
+            geo_constraint = (
+                f"All queries MUST be restricted to country code {country_hint}. "
+                f"Do NOT generate queries that could return results from other countries."
+            )
+        else:
+            geo_constraint = "No specific geographic constraint - search globally."
+
         prompt = EXPANSION_PROMPT.format(
             parent_query=parent.query,
             evidence_count=parent.evidence_count,
             best_confidence=parent.best_confidence,
             evidence_summary=compressed,
             weaknesses=", ".join(weak_areas) if weak_areas else "none identified",
+            geo_constraint=geo_constraint,
         )
 
         try:
