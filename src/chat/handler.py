@@ -194,51 +194,124 @@ Be specific and cite evidence sources."""
     async def _handle_refine_hint(
         self, session: Session, message: str
     ) -> AsyncGenerator[dict, None]:
-        """Handle user providing a location hint."""
+        """Handle user providing a location hint.
+        
+        This:
+        1. Adds the hint as evidence
+        2. Runs NEW searches with the hint + existing context (OCR, landmarks, etc.)
+        3. Filters wrong-region evidence 
+        4. Re-runs reasoning with all evidence
+        """
         yield {"event": "chat_step", "step": "Incorporating your hint..."}
+
+        # Extract hint from message (remove common prefixes)
+        hint_text = message
+        for prefix in ["the image is from ", "this is in ", "this is from ", "it's in ", "location: ", "narrow it down to ", "around "]:
+            if hint_text.lower().startswith(prefix):
+                hint_text = hint_text[len(prefix):]
+                break
+        hint_text = hint_text.strip().rstrip('?.!')
 
         # Add as USER_HINT evidence to session state
         hint_evidence = Evidence(
             source=EvidenceSource.USER_HINT,
-            content=f"User hint: {message}",
-            confidence=0.7,
+            content=f"User hint: {hint_text}",
+            confidence=0.85,  # Higher confidence for explicit hints
+            metadata={"hint": hint_text},
         )
 
-        # Append hint evidence to session pipeline state (cap at 200)
+        # Append hint evidence to session pipeline state
         evidences = session.pipeline_state.get("evidences", [])
         evidences.append(hint_evidence)
-        if len(evidences) > 200:
-            evidences.sort(
-                key=lambda e: e.confidence if isinstance(e, Evidence) else e.get("confidence", 0),
-                reverse=True,
-            )
-            evidences = evidences[:200]
         session.pipeline_state["evidences"] = evidences
 
-        # Re-run reasoning with augmented evidence
-        yield {"event": "chat_step", "step": "Re-analyzing with your hint..."}
+        # Build chain from current state
+        chain = self._build_chain_from_state(session)
+
+        # --- Run NEW searches with the hint! ---
+        yield {"event": "chat_step", "step": f"Running targeted searches for '{hint_text}'..."}
+        
+        new_evidence_count = 0
         try:
-            chain = self._build_chain_from_state(session)
+            from src.agents.web_intel_agent import WebIntelAgent
+            from src.cache import CacheStore
+            
+            # Create a fresh chain with just the hint for searching
+            search_chain = EvidenceChain()
+            search_chain.add(hint_evidence)
+            
+            # Get OCR/features from session if available
+            ocr_result = session.pipeline_state.get("ocr_result")
+            features = session.pipeline_state.get("features")
+            
+            # Run web intel agent with the hint
+            web_agent = WebIntelAgent(self.settings, cache=CacheStore.in_memory())
+            new_chain, search_graph = await web_agent.search(
+                evidence_chain=search_chain,
+                features=features,
+                ocr_result=ocr_result,
+                weak_areas=None,
+            )
+            await web_agent.close()
+            
+            # Merge new evidences into session
+            new_evidence_count = len(new_chain.evidences)
+            if new_evidence_count > 0:
+                yield {"event": "chat_step", "step": f"Found {new_evidence_count} new evidence items!"}
+                
+                # Add new evidences to the main chain
+                for e in new_chain.evidences:
+                    chain.add(e)
+                    
+                logger.info("Hint search found {} new evidences for '{}'", new_evidence_count, hint_text)
+        except Exception as e:
+            logger.warning("Hint-based search failed: {}", e)
+            yield {"event": "chat_step", "step": f"Search encountered an issue, proceeding with existing evidence..."}
+
+        # Filter evidence by hint country to remove wrong-country ML predictions
+        from src.geo.country_matcher import extract_country_from_location
+        hint_country = extract_country_from_location(hint_text)
+        if hint_country:
+            yield {"event": "chat_step", "step": f"Filtering evidence to {hint_text} region..."}
+            chain = chain.filter_by_hint(hint_country, keep_non_geo=True)
+
+        # Update session evidences with the combined + filtered chain
+        session.pipeline_state["evidences"] = chain.evidences
+
+        # Re-run reasoning with augmented evidence
+        yield {"event": "chat_step", "step": "Re-analyzing with your hint and new search results..."}
+        try:
+            # Pass the hint to reasoning for strong boosting
             updated = await self._reasoning_agent.reason_multi_candidate(
-                chain, skip_verification=True,
+                chain, 
+                skip_verification=True,
+                hint=hint_text,  # Pass hint explicitly
             )
             if updated:
                 session.pipeline_state["ranked_candidates"] = updated
                 session.pipeline_state["prediction"] = updated[0]
                 yield {"event": "candidates_update", "candidates": updated}
 
-            answer = (
-                f"I've incorporated your hint: \"{message}\" and re-analyzed the evidence. "
-                f"The predictions have been updated."
-            )
+            if new_evidence_count > 0:
+                answer = (
+                    f"I ran new targeted searches for \"{hint_text}\" and found {new_evidence_count} additional evidence items. "
+                    f"I've combined these with your existing evidence, filtered out results from other regions, "
+                    f"and re-analyzed everything. The predictions have been updated!"
+                )
+            else:
+                answer = (
+                    f"I've incorporated your hint: \"{hint_text}\" and re-analyzed the evidence. "
+                    f"Evidence from other regions has been filtered out, and candidates matching "
+                    f"your hint have been strongly boosted."
+                )
         except Exception as e:
             logger.warning("Re-reasoning after hint failed: {}", e)
             answer = (
-                f"Thanks for the hint! I've noted: \"{message}\" as additional evidence. "
+                f"Thanks for the hint! I've noted: \"{hint_text}\" as additional evidence. "
                 f"Re-analysis encountered an issue but the hint is saved."
             )
 
-        session.add_message("assistant", answer, {"intent": "refine_hint"})
+        session.add_message("assistant", answer, {"intent": "refine_hint", "hint": hint_text, "new_evidence_count": new_evidence_count})
         yield {"event": "chat_message", "role": "assistant", "content": answer}
 
     async def _handle_compare(

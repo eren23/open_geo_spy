@@ -117,19 +117,30 @@ class SerperClient(SearchProvider):
         Returns:
             Filtered and reranked results
         """
-        from src.geo.country_codes import get_iso_code, extract_country_from_hint
+        from src.geo.country_matcher import countries_match, extract_country_from_location
         
-        target_iso = extract_country_from_hint(country_hint)
+        target_iso = extract_country_from_location(country_hint)
         if not target_iso:
             return results
         
         scored_results = []
         for r in results:
             result_country = r.get("country") or self._extract_country_from_result(r)
-            result_iso = get_iso_code(result_country) if result_country else None
+            
+            # Use robust country matching
+            country_match = False
+            if result_country:
+                country_match = countries_match(country_hint, result_country)
+            elif target_iso:
+                # Check if target ISO appears in snippet/title
+                snippet = (r.get("snippet", "") + " " + r.get("title", "")).lower()
+                for name in [target_iso, country_hint.lower()]:
+                    if name in snippet:
+                        country_match = True
+                        break
             
             # Score based on match
-            if result_iso == target_iso:
+            if country_match:
                 r["_country_match"] = True
                 r["_score_boost"] = boost_factor
             else:

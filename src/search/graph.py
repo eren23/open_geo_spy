@@ -93,6 +93,7 @@ class SearchGraph:
     root_ids: list[str] = field(default_factory=list)
     failed_patterns: list[str] = field(default_factory=list)  # P1.8: Track failed query patterns
     max_retries: int = 2  # P1.7: Max retries before pruning
+    metadata: dict[str, Any] = field(default_factory=dict)  # Store hints and other context
 
     def add_node(
         self,

@@ -60,8 +60,11 @@ class FeatureExtractionAgent:
             )
 
         # Run all extractions in parallel
+        # Pass location_hint to visual feature extraction for hint-aware analysis
         metadata_task = asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)
-        features_task = visual_features.extract_visual_features(image_path, self.client, self.fast_model)
+        features_task = visual_features.extract_visual_features(
+            image_path, self.client, self.fast_model, location_hint=location_hint
+        )
         ocr_task = ocr.extract_text(image_path, self.client, self.fast_model)
 
         results = await asyncio.gather(metadata_task, features_task, ocr_task, return_exceptions=True)
@@ -129,7 +132,9 @@ class FeatureExtractionAgent:
             )
 
         metadata_task = asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)
-        features_task = visual_features.extract_visual_features(image_path, self.client, self.fast_model)
+        features_task = visual_features.extract_visual_features(
+            image_path, self.client, self.fast_model, location_hint=location_hint
+        )
         ocr_task = ocr.extract_text(image_path, self.client, self.fast_model)
 
         results = await asyncio.gather(metadata_task, features_task, ocr_task, return_exceptions=True)

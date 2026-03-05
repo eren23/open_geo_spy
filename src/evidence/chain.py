@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from loguru import logger
+
 from src.utils.geo_math import haversine_distance, validate_coordinates, weighted_centroid
 
 
@@ -270,3 +272,61 @@ class EvidenceChain:
         self.evidences.clear()
         self._hashes.clear()
         self._geo_evidences.clear()
+    
+    def filter_by_hint(self, hint_country: str, keep_non_geo: bool = True) -> "EvidenceChain":
+        """Filter evidence to only include items matching or not contradicting the hint country.
+        
+        This is used to remove evidence from wrong countries when the user provides
+        a strong location hint.
+        
+        Args:
+            hint_country: ISO country code or country name from user hint
+            keep_non_geo: Whether to keep evidence without country info (default True)
+            
+        Returns:
+            New filtered EvidenceChain
+        """
+        from src.geo.country_matcher import countries_match
+        
+        filtered = EvidenceChain()
+        for e in self.evidences:
+            # Always keep user hints
+            if e.source == EvidenceSource.USER_HINT:
+                filtered.add(e)
+                continue
+            
+            # Keep evidence without country if keep_non_geo is True
+            if not e.country:
+                if keep_non_geo:
+                    filtered.add(e)
+                continue
+            
+            # Keep evidence that matches the hint country
+            if countries_match(hint_country, e.country):
+                filtered.add(e)
+            else:
+                # Mark as filtered out for debugging
+                logger.debug(
+                    "Filtered out evidence from {} (hint={})",
+                    e.country, hint_country
+                )
+        
+        logger.info(
+            "Filtered evidence chain: {} -> {} evidences (hint={})",
+            len(self.evidences),
+            len(filtered.evidences),
+            hint_country,
+        )
+        
+        return filtered
+    
+    def get_hint_from_evidence(self) -> Optional[str]:
+        """Extract user hint from evidence chain if present.
+        
+        Returns:
+            The hint text or None
+        """
+        for e in self.evidences:
+            if e.source == EvidenceSource.USER_HINT:
+                return e.metadata.get("hint", e.content)
+        return None

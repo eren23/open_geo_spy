@@ -384,28 +384,53 @@ class WebIntelAgent:
 
         async def _search_one(provider: SearchProvider) -> list[Evidence]:
             async with self._api_semaphore:
-                # Pass country_hint to providers that support it
-                if hasattr(provider, 'search'):
-                    import inspect
-                    sig = inspect.signature(provider.search)
-                    if 'country_hint' in sig.parameters:
-                        results = await provider.search(query, num_results=5, country_hint=country_hint)
-                    else:
-                        results = await provider.search(query, num_results=5)
-                else:
-                    results = []
+                # Standard search
+                results = await provider.search(query, num_results=5)
+                
+                # Apply country filtering if hint available and provider supports it
+                if country_hint and hasattr(provider, 'filter_by_country_hint'):
+                    results = provider.filter_by_country_hint(
+                        results, 
+                        country_hint, 
+                        boost_factor=1.5
+                    )
                     
                 evidences = provider.results_to_evidence(results, query)
+                
+                # Apply score boosts/penalties from country filtering
+                for ev in evidences:
+                    # Find matching result to get boost
+                    for r in results:
+                        if ev.url == r.get("link") or ev.url == r.get("url"):
+                            boost = r.get("_score_boost")
+                            if boost and ev.confidence is not None:
+                                ev.confidence = min(1.0, ev.confidence * boost)
+                            break
 
                 # Serper-specific: also try places search for geo data
                 if hasattr(provider, "search_places"):
-                    import inspect
-                    sig = inspect.signature(provider.search_places)
-                    if 'country_hint' in sig.parameters:
-                        places = await provider.search_places(query, country_hint=country_hint)
-                    else:
-                        places = await provider.search_places(query)
-                    evidences.extend(provider.results_to_evidence(places, query))
+                    places = await provider.search_places(query)
+                    
+                    # Apply country filtering to places too
+                    if country_hint and hasattr(provider, 'filter_by_country_hint'):
+                        places = provider.filter_by_country_hint(
+                            places, 
+                            country_hint, 
+                            boost_factor=1.5
+                        )
+                    
+                    place_evidences = provider.results_to_evidence(places, query)
+                    
+                    # Apply score boosts
+                    for ev in place_evidences:
+                        for r in places:
+                            if ev.url == r.get("link") or ev.url == r.get("url"):
+                                boost = r.get("_score_boost")
+                                if boost and ev.confidence is not None:
+                                    ev.confidence = min(1.0, ev.confidence * boost)
+                                break
+                    
+                    evidences.extend(place_evidences)
 
                 return evidences
 

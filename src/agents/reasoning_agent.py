@@ -42,16 +42,19 @@ REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evide
 ## Location Hint
 {location_hint}
 
-## Instructions
-1. If a user location hint is provided, give it SIGNIFICANT weight - the user likely has contextual knowledge about where the image was taken. Candidates matching the hint should be strongly preferred.
-2. Weigh evidence by source reliability and mutual corroboration
-3. Prioritize evidence that multiple independent sources agree on
-4. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
-5. Country-level agreement across models is highly diagnostic
-6. OCR text (signs, plates, businesses) provides regional/local specificity
-7. Be SPECIFIC - neighborhood > city > region > country
-8. Confidence MUST reflect actual evidence strength, NOT be inflated
-9. Visual match evidence (source=visual_match) compares the query image against reference photos
+## CRITICAL INSTRUCTIONS
+1. **USER HINT IS AUTHORITATIVE**: If a user location hint is provided above, you MUST prioritize it above ALL other evidence. The user has contextual knowledge you don't have. Even if ML models suggest elsewhere, prefer the hinted region.
+
+2. **Discordant evidence handling**: If ML models predict different countries than the hint, the hint wins. Mark the ML predictions as "contradicted by user knowledge" in your reasoning.
+
+3. Weigh evidence by source reliability and mutual corroboration
+4. Prioritize evidence that multiple independent sources agree on
+5. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
+6. Country-level agreement across models is highly diagnostic
+7. OCR text (signs, plates, businesses) provides regional/local specificity
+8. Be SPECIFIC - neighborhood > city > region > country
+9. Confidence MUST reflect actual evidence strength, NOT be inflated
+10. Visual match evidence (source=visual_match) compares the query image against reference photos
    of candidate locations. HIGH similarity is strong evidence for that specific location.
    This is the BEST evidence for distinguishing between same-category candidates (e.g., two hotels in the same city).
 
@@ -123,9 +126,11 @@ class ReasoningAgent:
 
         # Extract location hint from evidence chain
         hint_text = "No hint provided"
+        hint_raw = None
         for e in evidence_chain.evidences:
             if e.source == EvidenceSource.USER_HINT:
-                hint_text = f"User says the image is from: {e.metadata.get('hint', e.content)}"
+                hint_raw = e.metadata.get("hint", e.content)
+                hint_text = f"User says the image is from: {hint_raw} (STRONGLY prefer locations matching this hint)"
                 break
 
         prompt = REASONING_PROMPT.format(
@@ -223,12 +228,20 @@ class ReasoningAgent:
         features: dict[str, Any] | None = None,
         max_candidates: int = 5,
         skip_verification: bool = False,
+        hint: str | None = None,
     ) -> list[dict[str, Any]]:
         """Produce top-N ranked candidate locations.
 
         1. Cluster evidence by geographic proximity (haversine, eps=50km)
         2. For each cluster, synthesize a candidate via LLM
         3. Rank by composite score
+        
+        Args:
+            evidence_chain: Combined evidence from all agents
+            features: Raw visual features (for environment type)
+            max_candidates: Maximum number of candidates to return
+            skip_verification: Skip CoVe verification for faster results
+            hint: Optional location hint to strongly prefer matching candidates
         """
         from src.utils.geo_math import haversine_distance
 
@@ -245,15 +258,26 @@ class ReasoningAgent:
 
         # Compute dominant country from full evidence chain
         all_countries = list(evidence_chain.country_predictions)
-        # User hint gets 3 extra country votes to reflect its authority
-        hint = None
-        for e in evidence_chain.evidences:
-            if e.source == EvidenceSource.USER_HINT:
-                hint = e.metadata.get("hint", "").strip().lower()
-                hint_country = e.country or hint
-                if hint_country:
-                    all_countries.extend([hint_country] * self.scorer.hint_vote_multiplier)
-                break
+        # User hint gets extra country votes to reflect its authority
+        # Check for hint parameter first, then look in evidence chain
+        hint_text = hint
+        if not hint_text:
+            for e in evidence_chain.evidences:
+                if e.source == EvidenceSource.USER_HINT:
+                    hint_text = e.metadata.get("hint", "").strip().lower()
+                    hint_country = e.country or hint_text
+                    if hint_country:
+                        all_countries.extend([hint_country] * self.scorer.hint_vote_multiplier)
+                    break
+        elif hint_text:
+            # Explicit hint parameter - add votes for it
+            from src.geo.country_matcher import extract_country_from_location
+            hint_country = extract_country_from_location(hint_text)
+            if hint_country:
+                all_countries.extend([hint_country] * self.scorer.hint_vote_multiplier)
+        
+        # Use hint_text for matching (either from parameter or evidence chain)
+        hint = hint_text
 
         dominant_country: str | None = None
         country_consensus_strength: float = 0.0
@@ -307,17 +331,30 @@ class ReasoningAgent:
 
         # Boost candidates matching the location hint; penalize non-matches
         if hint:
+            from src.geo.country_matcher import countries_match, extract_country_from_location
+            
+            # Extract country from hint for more robust matching
+            hint_country = extract_country_from_location(hint)
+            
             for c in candidates:
-                c_country = (c.get("country") or "").lower()
-                c_city = (c.get("city") or "").lower()
-                c_name = (c.get("name") or "").lower()
+                c_country = c.get("country") or ""
+                c_city = c.get("city") or ""
+                c_name = c.get("name") or ""
                 
-                # Check for match at different levels
-                country_match = hint in c_country
-                city_match = hint in c_city
-                name_match = hint in c_name
+                # Use robust country matching
+                country_match = countries_match(hint, c_country) if c_country else False
                 
-                if country_match or city_match or name_match:
+                # Also check if hint matches city or name (string-based)
+                hint_lower = hint.lower()
+                city_match = hint_lower in c_city.lower() if c_city else False
+                name_match = hint_lower in c_name.lower() if c_name else False
+                
+                # Check if hint contains the country name or vice versa
+                hint_contains_country = False
+                if hint_country and c_country:
+                    hint_contains_country = countries_match(hint_country, c_country)
+                
+                if country_match or city_match or name_match or hint_contains_country:
                     # Strong boost for matching candidates
                     strong_match = city_match or name_match
                     c["confidence"] = self.scorer.hint_boost(
@@ -331,6 +368,10 @@ class ReasoningAgent:
                         c.get("confidence", 0)
                     )
                     c["hint_matched"] = False
+                    logger.debug(
+                        "Candidate '{}' penalized - country '{}' doesn't match hint '{}'",
+                        c_name, c_country, hint
+                    )
 
         # Ranking uses capped trails; redistribution enriches output payload after ranking is final
         ranked = self._rank_candidates(

@@ -220,8 +220,24 @@ async def ml_ensemble_node(
             if city_name not in candidate_cities:
                 candidate_cities.append(city_name)
 
+        # Get location hint from state and resolve to country code
+        location_hint = state.get("location_hint")
+        country_hint = None
+        if location_hint:
+            from src.geo.country_matcher import extract_country_from_location
+            country_hint = extract_country_from_location(location_hint)
+            logger.info(
+                "ML ensemble using hint: '{}' (country={})",
+                location_hint,
+                country_hint or "unknown",
+            )
+
         chain = await agent.predict(
-            state["image_path"], feature_chain, candidate_cities=candidate_cities or None,
+            state["image_path"],
+            feature_chain,
+            candidate_cities=candidate_cities or None,
+            location_hint=location_hint,
+            country_hint=country_hint,
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 
@@ -556,6 +572,31 @@ async def reasoning_node(
     try:
         evidence_chain = _build_chain_from_state(state)
         features = state.get("features", {})
+        
+        # Get location hint and optionally filter evidence
+        location_hint = state.get("location_hint")
+        if location_hint:
+            # Log that we have a hint
+            writer({
+                "event": "hint_applied",
+                "hint": location_hint,
+            })
+            
+            # Filter evidence to only include matching countries
+            # This prevents wrong-country ML predictions from polluting results
+            from src.geo.country_matcher import extract_country_from_location
+            hint_country = extract_country_from_location(location_hint)
+            if hint_country:
+                logger.info(
+                    "Filtering evidence by hint country: {} -> {}",
+                    location_hint,
+                    hint_country,
+                )
+                # Keep non-geo evidence but filter geo evidence from wrong countries
+                evidence_chain = evidence_chain.filter_by_hint(
+                    hint_country,
+                    keep_non_geo=True,
+                )
 
         # Produce multi-candidate results and use the top one as primary
         quality = (state.get("quality") or "balanced").lower()
