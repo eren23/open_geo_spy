@@ -133,5 +133,59 @@ class SearXNGClient(SearchProvider):
             )
         return evidences
 
+    def filter_by_country_hint(
+        self,
+        results: list[dict[str, Any]],
+        country_hint: str,
+        boost_factor: float = 1.5,
+    ) -> list[dict[str, Any]]:
+        """Filter and boost results based on country hint.
+        
+        Args:
+            results: Search results to filter
+            country_hint: Country name or ISO code from user hint
+            boost_factor: Confidence multiplier for matching results
+            
+        Returns:
+            Filtered and reranked results
+        """
+        from src.geo.country_matcher import countries_match, extract_country_from_location, get_all_names
+        
+        target_iso = extract_country_from_location(country_hint)
+        if not target_iso:
+            return results
+        
+        scored_results = []
+        for r in results:
+            # Extract country from result if available
+            result_country = r.get("country")
+            snippet = (r.get("snippet", "") + " " + r.get("title", "")).lower()
+            
+            # Use robust country matching
+            country_match = False
+            if result_country:
+                country_match = countries_match(country_hint, result_country)
+            else:
+                # Check if country name/ISO appears in snippet/title
+                all_names = get_all_names(target_iso)
+                for name in [target_iso.lower(), country_hint.lower()] + [n.lower() for n in all_names]:
+                    if name in snippet:
+                        country_match = True
+                        break
+            
+            # Score based on match
+            if country_match:
+                r["_country_match"] = True
+                r["_score_boost"] = boost_factor
+            else:
+                r["_country_match"] = False
+                r["_score_boost"] = 0.5  # Penalty for non-matching
+            
+            scored_results.append(r)
+        
+        # Sort by country match first, then by original position
+        scored_results.sort(key=lambda x: (not x.get("_country_match", False), results.index(x) if x in results else 999))
+        return scored_results
+
     async def close(self):
         await self._client.aclose()

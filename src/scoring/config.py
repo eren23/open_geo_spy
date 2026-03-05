@@ -69,11 +69,12 @@ class EnsembleBlend(BaseModel):
 class CandidateRankingWeights(BaseModel):
     """Weights for the composite candidate ranking score."""
 
-    confidence: float = 0.40
+    confidence: float = 0.35  # Slightly reduced
     evidence_count: float = 0.10
     source_diversity: float = 0.10
     visual_match: float = 0.15
-    country_match: float = 0.25
+    country_match: float = 0.30  # Increased from 0.25
+    country_match_with_hint: float = 0.45  # Even higher when user hint present
     evidence_count_cap: int = 5
     evidence_count_normalizer: float = 5.0
     source_diversity_normalizer: float = 5.0
@@ -83,15 +84,18 @@ class CountryPenalty(BaseModel):
     """Parameters for penalizing wrong-country candidates."""
 
     consensus_threshold: float = 0.6  # Only apply penalty when dominance > 60% (P2.3)
+    consensus_threshold_with_hint: float = 0.4  # Lower threshold when user hint is present
     penalty_factor: float = 0.7
-    hint_vote_multiplier: int = 3
+    hint_vote_multiplier: int = 10  # Increased from 3 - user hints are very valuable
+    strong_hint_penalty: float = 0.1  # Heavy penalty for non-matching candidates when hint present
 
 
 class HintAdjustment(BaseModel):
     """Confidence adjustments for location hint matching."""
 
-    match_boost: float = 1.5
-    no_match_penalty: float = 0.5
+    match_boost: float = 1.8  # Increased from 1.5
+    no_match_penalty: float = 0.15  # More aggressive penalty (was 0.5)
+    strong_match_boost: float = 2.0  # For exact city/region match with hint
 
 
 class VerificationAdjustment(BaseModel):

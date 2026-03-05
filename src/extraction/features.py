@@ -51,13 +51,63 @@ Return a JSON object with these fields:
 }
 """
 
+FEATURE_EXTRACTION_PROMPT_WITH_HINT = """Analyze this image for geolocation clues.
+
+IMPORTANT CONTEXT: The user indicates this image is from: {location_hint}
+
+This is a STRONG prior - focus your analysis on features consistent with this location, but still identify any contradictory evidence.
+
+Extract ALL visual features that could help identify the location. Return a JSON object with these fields:
+{
+  "landmarks": ["list of recognizable landmarks, monuments, statues - prioritize those known in {location_hint}"],
+  "architecture_style": "dominant architectural style typical of this region",
+  "building_types": ["types of buildings: residential, commercial, industrial, religious, government"],
+  "vegetation": {
+    "type": "tropical/temperate/arid/boreal/none",
+    "density": "dense/moderate/sparse/none",
+    "notable_species": ["species typical for {location_hint}"]
+  },
+  "terrain": ["flat", "hilly", "mountainous", "coastal", etc.],
+  "water_bodies": ["ocean", "river", "lake", etc.],
+  "infrastructure": {
+    "road_type": "highway/urban_road/rural_road/path/none",
+    "road_markings": "description of lane markings, colors - note if typical for {location_hint}",
+    "traffic_side": "left/right/unclear - verify this matches {location_hint}",
+    "power_lines": true/false,
+    "rail": true/false
+  },
+  "vehicles": {
+    "types": ["car", "truck", "bus", "motorcycle", "bicycle"],
+    "notable": "any distinctive vehicle features typical for {location_hint} (brand, taxi color, bus style)"
+  },
+  "environment_type": "URBAN/SUBURBAN/RURAL/INDUSTRIAL/AIRPORT/COASTAL/FOREST/MOUNTAIN/DESERT/PARK/HIGHWAY",
+  "weather_climate": "sunny/cloudy/rainy/snowy/foggy + hot/warm/cool/cold",
+  "time_of_day": "morning/midday/afternoon/evening/night",
+  "cultural_indicators": ["flags", "writing systems", "clothing styles", "food types typical for {location_hint}"],
+  "country_clues": ["specific clues confirming or contradicting {location_hint}"],
+  "hint_verification": {
+    "supports_hint": true/false,
+    "contradictions": ["features that contradict {location_hint}"],
+    "confidence_in_hint": 0.0-1.0
+  },
+  "confidence_notes": "brief note on how well features align with {location_hint}"
+}
+"""
+
 
 async def extract_visual_features(
     image_path: str,
     client: Any,
     model: str = "google/gemini-2.5-flash",
+    location_hint: str | None = None,
 ) -> dict[str, Any]:
     """Extract visual features from image using VLM.
+
+    Args:
+        image_path: Path to the image file
+        client: OpenAI-compatible async client
+        model: Model to use for extraction
+        location_hint: Optional user-provided location hint to guide analysis
 
     Returns structured feature dict for geolocation analysis.
     """
@@ -66,6 +116,13 @@ async def extract_visual_features(
     try:
         image_url = _encode_image(image_path)
 
+        # Use hint-aware prompt if location hint is provided
+        if location_hint:
+            prompt = FEATURE_EXTRACTION_PROMPT_WITH_HINT.format(location_hint=location_hint)
+            logger.info("Using hint-aware feature extraction for: {}", location_hint)
+        else:
+            prompt = FEATURE_EXTRACTION_PROMPT
+
         resp = await execute_with_retry(
             client.chat.completions.create,
             model=model,
@@ -73,7 +130,7 @@ async def extract_visual_features(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": FEATURE_EXTRACTION_PROMPT},
+                        {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": image_url}},
                     ],
                 }
@@ -85,7 +142,17 @@ async def extract_visual_features(
         )
 
         raw = resp.choices[0].message.content
-        return _parse_features(raw)
+        features = _parse_features(raw)
+        
+        # Store hint verification results in metadata if present
+        if location_hint and "hint_verification" in features:
+            logger.info(
+                "Hint verification: supports={}, confidence={:.2f}",
+                features["hint_verification"].get("supports_hint"),
+                features["hint_verification"].get("confidence_in_hint", 0),
+            )
+        
+        return features
 
     except Exception as e:
         logger.error("Visual feature extraction failed: {}", e)

@@ -4,6 +4,24 @@ All notable changes to OpenGeoSpy will be documented in this file.
 
 ---
 
+## [0.3.2] — 2025-01-14
+
+### Bug Fixes
+
+- **Fixed `SearchGraph.metadata` AttributeError**: Added missing `metadata` dict field to `SearchGraph` dataclass that was being accessed by `WebIntelAgent` for storing hints and country context.
+
+### Chat Improvements
+
+- **Hint-triggered searches**: When users provide location hints in chat (e.g., "narrow it down to Baden-Württemberg"), the system now runs **new targeted web searches** instead of just filtering existing evidence. This combines fresh search results with the hint context to find more specific locations.
+- **Better hint parsing**: Improved prefix stripping to handle phrases like "narrow it down to" and "around" in addition to previous patterns.
+- **Informative feedback**: Chat responses now indicate how many new evidence items were found from hint-triggered searches.
+
+### Files Changed
+- `src/search/graph.py` — Added `metadata: dict[str, Any]` field to `SearchGraph`
+- `src/chat/handler.py` — `_handle_refine_hint()` now instantiates `WebIntelAgent` and runs fresh searches with user hints
+
+---
+
 ## [0.3.1] — 2026-03-02
 
 ### Search Quality Improvements

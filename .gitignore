@@ -43,3 +43,5 @@ env/
 .codex
 .attocode/traces
 .attocode/sessions
+
+.cursor/

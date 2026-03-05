@@ -63,14 +63,17 @@ class GeoScorer:
         source_diversity: int,
         visual_match: float,
         country_match: float,
+        has_hint: bool = False,
     ) -> float:
         w = self.config.candidate_ranking
+        # Use higher country_match weight when hint is present
+        country_weight = w.country_match_with_hint if has_hint else w.country_match
         return (
             w.confidence * raw_confidence
             + w.evidence_count * min(evidence_count / w.evidence_count_normalizer, 1.0)
             + w.source_diversity * min(source_diversity / w.source_diversity_normalizer, 1.0)
             + w.visual_match * visual_match
-            + w.country_match * country_match
+            + country_weight * country_match
         )
 
     # ------------------------------------------------------------------
@@ -113,11 +116,16 @@ class GeoScorer:
     # Hint adjustment
     # ------------------------------------------------------------------
 
-    def hint_boost(self, confidence: float) -> float:
-        return min(1.0, confidence * self.config.hint.match_boost)
+    def hint_boost(self, confidence: float, strong_match: bool = False) -> float:
+        boost = self.config.hint.strong_match_boost if strong_match else self.config.hint.match_boost
+        return min(1.0, confidence * boost)
 
     def hint_penalty(self, confidence: float) -> float:
         return confidence * self.config.hint.no_match_penalty
+
+    def strong_hint_country_penalty(self, confidence: float) -> float:
+        """Heavy penalty for candidates that don't match the hinted country."""
+        return max(0.05, confidence * self.config.country_penalty.strong_hint_penalty)
 
     # ------------------------------------------------------------------
     # Verification adjustment

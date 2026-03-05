@@ -22,7 +22,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # Copy source and install Python dependencies
 COPY pyproject.toml .
 COPY src/ ./src/
-RUN pip install .
+# Increase timeout for large packages like geoclip (40MB+)
+RUN pip install --timeout 300 .
 
 RUN PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium --with-deps || true
 COPY .env .

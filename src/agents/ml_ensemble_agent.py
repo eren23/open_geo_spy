@@ -49,10 +49,24 @@ class MLEnsembleAgent:
         image_path: str,
         feature_evidence: EvidenceChain | None = None,
         candidate_cities: list[str] | None = None,
+        location_hint: str | None = None,
+        country_hint: str | None = None,
     ) -> EvidenceChain:
-        """Run all enabled ML models in parallel and return aggregated evidence."""
+        """Run all enabled ML models in parallel and return aggregated evidence.
+        
+        Args:
+            image_path: Path to image file
+            feature_evidence: Prior evidence from feature extraction
+            candidate_cities: Cities to consider for StreetCLIP
+            location_hint: User-provided location hint (raw text)
+            country_hint: ISO country code to constrain predictions
+        """
         chain = EvidenceChain()
-        logger.info("Starting ML ensemble prediction")
+        logger.info(
+            "Starting ML ensemble prediction (hint={}, country={})",
+            location_hint or "none",
+            country_hint or "none",
+        )
 
         # Build context from prior evidence
         context: dict[str, Any] = {}
@@ -61,6 +75,11 @@ class MLEnsembleAgent:
         # Pass candidate cities for StreetCLIP city prediction
         if candidate_cities:
             context["candidate_cities"] = candidate_cities
+        # Pass hint context for models that support it
+        if location_hint:
+            context["location_hint"] = location_hint
+        if country_hint:
+            context["country_hint"] = country_hint
 
         # Discover enabled models from registry
         models = ModelRegistry.get_enabled(self.settings)
