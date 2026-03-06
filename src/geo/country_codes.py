@@ -6,9 +6,19 @@ No hardcoded country lists - works for any city, region, or country.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from loguru import logger
+
+from src.config.llm import LLMCallType, get_llm_params
+
+__all__ = [
+    "get_iso_code",
+    "resolve_location_to_country",
+    "extract_country_from_location",
+    "get_google_gl",
+    "get_google_cr",
+]
 
 # Simple cache for resolved locations (in-memory, expires on restart)
 _RESOLVED_CACHE: dict[str, str | None] = {}
@@ -28,156 +38,82 @@ def get_iso_code(country_name: str) -> str | None:
     Returns:
         ISO 3166-1 alpha-2 code or None
     """
-    if not country_name:
-        return None
-    
-    name = country_name.strip()
-    
-    # Already an ISO code - validate and return
-    if len(name) == 2 and name.isalpha():
-        return name.upper()
-    
-    # Check cache for previously resolved names
-    name_lower = name.lower()
-    if name_lower in _RESOLVED_CACHE:
-        return _RESOLVED_CACHE[name_lower]
-    
-    # Not in cache - caller should use resolve_location_to_country for full resolution
+    code = _RESOLVED_CACHE.get(country_name)
+    if code:
+        return code
     return None
-
-
-def get_google_cr(iso_code: str) -> str | None:
-    """Get Google cr parameter value from ISO code.
-    
-    Args:
-        iso_code: ISO 3166-1 alpha-2 code like "TR", "US"
-    
-    Returns:
-        Google cr value like "countryTR" or None if not a valid ISO code
-    """
-    if not iso_code or len(iso_code) != 2:
-        return None
-    return f"country{iso_code.upper()}"
-
-
-def get_google_gl(iso_code: str) -> str:
-    """Get Google gl parameter value from ISO code.
-    
-    Args:
-        iso_code: ISO 3166-1 alpha-2 code
-    
-    Returns:
-        Google gl value (lowercase ISO code, defaults to "us")
-    """
-    return iso_code.lower() if iso_code and len(iso_code) == 2 else "us"
 
 
 async def resolve_location_to_country(
-    location_hint: str,
-    llm_client: Any = None,
+    location: str,
+    client: Optional[Any] = None,
+    settings: Optional[Any] = None,
+    llm_client: Optional[Any] = None,
 ) -> str | None:
-    """Resolve any location hint to an ISO country code.
+    """Resolve any location string to an ISO country code.
     
-    Uses multiple strategies in order:
-    1. Check cache for previously resolved hints
-    2. Use geocoding API (Nominatim/OSM) to get country
-    3. Fallback to LLM extraction for ambiguous cases
-    
-    Args:
-        location_hint: Any location string (city, country, region, etc.)
-        llm_client: Optional OpenAI client for LLM fallback
-    
-    Returns:
-        ISO 3166-1 alpha-2 code like "TR", "JP", "US" or None
-    """
-    if not location_hint:
-        return None
-    
-    hint_normalized = location_hint.strip().lower()
-    
-    # Check cache first
-    if hint_normalized in _RESOLVED_CACHE:
-        return _RESOLVED_CACHE[hint_normalized]
-    
-    # Try geocoding first (free, no LLM cost)
-    iso_code = await _geocode_to_country(hint_normalized)
-    if iso_code:
-        _RESOLVED_CACHE[hint_normalized] = iso_code
-        return iso_code
-    
-    # Fallback to LLM if available
-    if llm_client:
-        iso_code = await _llm_extract_country(location_hint, llm_client)
-        if iso_code:
-            _RESOLVED_CACHE[hint_normalized] = iso_code
-            return iso_code
-    
-    # Cache negative result to avoid repeated lookups
-    _RESOLVED_CACHE[hint_normalized] = None
-    return None
-
-
-async def _geocode_to_country(location: str) -> str | None:
-    """Use Nominatim/OSM geocoding to resolve location to country ISO code.
-    
-    Args:
-        location: Location string to geocode
-    
-    Returns:
-        ISO country code or None
-    """
-    try:
-        import httpx
-        
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            # Use Nominatim (free, no API key needed)
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={
-                    "q": location,
-                    "format": "json",
-                    "limit": 1,
-                    "addressdetails": 1,
-                },
-                headers={"User-Agent": "OpenGeoSpy/1.0"},
-            )
-            resp.raise_for_status()
-            results = resp.json()
-            
-            if results:
-                address = results[0].get("address", {})
-                country_code = address.get("country_code", "").upper()
-                if country_code and len(country_code) == 2:
-                    logger.debug(
-                        "Geocoded '{}' to country '{}' via Nominatim",
-                        location, country_code
-                    )
-                    return country_code
-                
-    except Exception as e:
-        logger.debug("Geocoding failed for '{}': {}", location, e)
-    
-    return None
-
-
-async def _llm_extract_country(location: str, client: Any) -> str | None:
-    """Use LLM to extract country ISO code from location hint.
-    
-    Handles:
-    - City names: "Istanbul" → TR
-    - Regional names: "Catalonia" → ES
-    - Ambiguous names: "Georgia" → US state or GE country
-    - Misspellings: "Constaninople" → TR
+    Uses a multi-step approach:
+    1. Try geocoding APIs (Nominatim, OpenStreetMap)
+    2. Fall back to LLM
     
     Args:
         location: Location hint string
         client: OpenAI async client
+        settings: Settings object with LLM configuration
+        llm_client: Pre-configured LLM client (optional)
     
     Returns:
-        ISO country code or None
+        ISO 3166-1 alpha-2 code or None
     """
+    # Check cache first
+    if location in _RESOLVED_CACHE:
+        return _RESOLVED_CACHE[location]
+    
+    import httpx
+    
+    # Step 1: Try geocoding APIs
+    # Note: Only forward geocoding services (text → coordinates) are useful here
+    # Reverse geocoding (/reverse) requires lat/lon which we don't have
+    geocoding_services = [
+        ("Nominatim", "https://nominatim.openstreetmap.org/search", {"accept-language": "en", "addressdetails": 1}),
+    ]
+    
+    for service_name, geocoding_url, geocoding_params in geocoding_services:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as http_client:
+                params = {"q": location, **geocoding_params}
+                resp = await http_client.get(geocoding_url, params=params)
+                data = resp.json()
+
+                # Nominatim /search returns a list of results
+                if isinstance(data, list) and len(data) > 0:
+                    first_result = data[0]
+                    if first_result.get("address") and first_result["address"].get("country_code"):
+                        code = first_result["address"]["country_code"]
+                        _RESOLVED_CACHE[location] = code
+                        logger.debug("Geocoded '{}' → {}", location, code)
+                        return code
+        except Exception:
+            pass
+    
+    # Step 2: LLM fallback
+    effective_client = llm_client or client
+    if effective_client is not None:
+        code = await _llm_extract_country(location, effective_client, settings)
+        if code:
+            _RESOLVED_CACHE[location] = code
+        return code
+
+    return None
+
+
+async def _llm_extract_country(location: str, client: Any, settings: Any = None) -> str | None:
+    """Use LLM to extract country ISO code from location hint."""
     try:
-        prompt = f"""Given this location hint: "{location}"
+        llm_params = get_llm_params(LLMCallType.GEO_COUNTRY_RESOLVE, settings)
+        resp = await client.chat.completions.create(
+            **llm_params,
+            messages=[{"role": "user", "content": f"""Given this location hint: "{location}"
 
 Return ONLY the ISO 3166-1 alpha-2 country code (2 letters) for where this location is.
 
@@ -185,19 +121,12 @@ Rules:
 - For cities: return the country code (e.g., "Istanbul" → "TR")
 - For regions: return the country code (e.g., "Bavaria" → "DE")
 - For US states: return "US" (e.g., "Georgia (US state)" → "US")
-- For countries: return their code (e.g., "Turkey" → "TR")
+- For countries: return each code (e.g., "Turkey" → "TR")
 - If ambiguous, pick the most likely
 - If you can't determine, return "UNKNOWN"
 
-Return ONLY the 2-letter code, nothing else."""
-
-        resp = await client.chat.completions.create(
-            model="google/gemini-2.5-flash",  # Fast, cheap
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=10,
+Return ONLY the 2-letter code, nothing else."""}],
         )
-        
         result = resp.choices[0].message.content.strip().upper()
         
         # Validate it's a proper 2-letter code
@@ -211,29 +140,81 @@ Return ONLY the 2-letter code, nothing else."""
     return None
 
 
-def extract_country_from_hint(hint: str) -> str | None:
+def extract_country_from_location(hint: str) -> str | None:
     """Synchronous version that only does basic extraction.
     
     For full resolution including geocoding, use resolve_location_to_country().
     
     Args:
         hint: Location hint string
-    
+        
     Returns:
-        ISO code if directly provided, otherwise None
+        ISO country code or None if cannot resolve
     """
-    if not hint:
-        return None
+    # Simple patterns for common country mentions
+    hint_lower = hint.lower()
     
-    hint_clean = hint.strip()
+    # Direct country mentions
+    countries = {
+        "turkey": "TR", "türkiye": "TR", "germany": "DE", "deutschland": "DE",
+        "france": "FR", "frança": "FR", "spain": "ES", "españa": "ES",
+        "italy": "IT", "italia": "IT", "greece": "GR", "united kingdom": "GB", "uk": "GB",
+        "united states": "US", "usa": "US", "japan": "JP", "russia": "RU", "china": "CN",
+        "brazil": "BR", "india": "IN", "australia": "AU", "canada": "CA",
+        "mexico": "MX", "argentina": "AR", "netherlands": "NL", "poland": "PL",
+        "portugal": "PT", "sweden": "SE", "norway": "NO", "denmark": "DK",
+        "finland": "FI", "switzerland": "CH", "austria": "AT", "belgium": "BE",
+        "ireland": "IE", "czech": "CZ", "hungary": "HU", "romania": "RO",
+        "bulgaria": "BG", "croatia": "HR", "serbia": "RS", "ukraine": "UA",
+        "south korea": "KR", "korea": "KR", "thailand": "TH", "vietnam": "VN",
+        "indonesia": "ID", "malaysia": "MY", "philippines": "PH", "singapore": "SG",
+        "new zealand": "NZ", "south africa": "ZA", "egypt": "EG", "morocco": "MA",
+        "israel": "IL", "iran": "IR", "iraq": "IQ", "saudi arabia": "SA",
+        "uae": "AE", "qatar": "QA", "kuwait": "KW", "pakistan": "PK",
+        "bangladesh": "BD", "sri lanka": "LK", "nepal": "NP", "myanmar": "MM",
+        "cambodia": "KH", "laos": "LA", "taiwan": "TW", "hong kong": "HK",
+        "macau": "MO", "mongolia": "MN", "kazakhstan": "KZ", "uzbekistan": "UZ",
+        "azerbaijan": "AZ", "georgia": "GE", "armenia": "AM",
+        "peru": "PE", "chile": "CL", "colombia": "CO", "venezuela": "VE",
+        "ecuador": "EC", "bolivia": "BO", "paraguay": "PY", "uruguay": "UY",
+        "cuba": "CU", "jamaica": "JM", "dominican republic": "DO",
+        "puerto rico": "PR", "haiti": "HT",
+    }
     
-    # Direct ISO code provided
-    if len(hint_clean) == 2 and hint_clean.isalpha():
-        return hint_clean.upper()
+    for name, code in countries.items():
+        if name in hint_lower:
+            return code
     
-    # Check cache for previously resolved
-    hint_lower = hint_clean.lower()
-    if hint_lower in _RESOLVED_CACHE:
-        return _RESOLVED_CACHE[hint_lower]
+    # Check for city patterns
+    city_patterns = ["istanbul", "berlin", "paris", "london", "tokyo", "moscow", "beijing"]
+    for city in city_patterns:
+        if city in hint_lower:
+            # Map cities to countries
+            city_map = {
+                "istanbul": "TR", "ankara": "TR", "berlin": "DE", "munich": "DE",
+                "paris": "FR", "lyon": "FR", "london": "GB", "manchester": "GB",
+                "tokyo": "JP", "osaka": "JP", "moscow": "RU", "saint petersburg": "RU",
+            }
+            return city_map.get(city, None)
     
+    # No match found
     return None
+
+
+def get_google_gl(iso_code: str) -> str:
+    """Return Google gl (geolocation) param from ISO code. Lowercase."""
+    if not iso_code or len(iso_code) != 2:
+        return "us"
+    # Google uses 'uk' for United Kingdom, not 'gb'
+    if iso_code.upper() == "GB":
+        return "uk"
+    return iso_code.lower()
+
+
+def get_google_cr(iso_code: str) -> str | None:
+    """Return Google cr (country restrict) param from ISO code. Format: countryXX."""
+    if not iso_code or len(iso_code) != 2:
+        return None
+    # Google uses countryUK for United Kingdom
+    code = "UK" if iso_code.upper() == "GB" else iso_code.upper()
+    return f"country{code}"

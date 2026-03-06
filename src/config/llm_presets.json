@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "LLM call type configuration overrides. These merge with defaults in llm.py",
+  "overrides": {
+    "intent_classify": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 50
+    },
+    "feature_extraction": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 2000
+    },
+    "ocr": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 2000
+    },
+    "reasoning": {
+      "model_tier": "reasoning",
+      "temperature": 0.1,
+      "max_tokens": 2000
+    },
+    "reasoning_multi": {
+      "model_tier": "reasoning",
+      "temperature": 0.1,
+      "max_tokens": 2000
+    },
+    "verification_quick": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 200
+    },
+    "verification_claims": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 1500
+    },
+    "geo_country_resolve": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 10
+    },
+    "geo_location_resolve": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "geo_street_resolve": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "query_expansion": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "smart_query_suggestion": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 800
+    },
+    "judge": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 500
+    },
+    "vlm_geo": {
+      "model_tier": "heavy",
+      "temperature": 0.1,
+      "max_tokens": 1500
+    },
+    "vlm_analysis": {
+      "model_tier": "fast",
+      "temperature": 0.0,
+      "max_tokens": 2000
+    },
+    "chat_why_not": {
+      "model_tier": "reasoning",
+      "temperature": 0.2,
+      "max_tokens": 1000
+    },
+    "chat_explain": {
+      "model_tier": "fast",
+      "temperature": 0.2,
+      "max_tokens": 800
+    },
+    "chat_zoom_feature": {
+      "model_tier": "fast",
+      "temperature": 0.2,
+      "max_tokens": 600
+    },
+    "chat_general": {
+      "model_tier": "fast",
+      "temperature": 0.3,
+      "max_tokens": 600
+    }
+  }
+}

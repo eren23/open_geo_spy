@@ -20,6 +20,7 @@ from openai import AsyncOpenAI
 from sklearn.cluster import DBSCAN
 
 from src.config.settings import Settings, get_scoring_config
+from src.config.llm import LLMCallType, get_llm_params
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.evidence.verifier import LocationVerifier
 from src.scoring.scorer import GeoScorer
@@ -146,11 +147,10 @@ class ReasoningAgent:
 
         # Primary reasoning
         try:
+            llm_params = get_llm_params(LLMCallType.REASONING, self.settings)
             resp = await self.client.chat.completions.create(
-                model=self.primary_model,
+                **llm_params,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=2000,
             )
             prediction = _parse_prediction(resp.choices[0].message.content)
             if prediction.get("reasoning") == "Parse failed":

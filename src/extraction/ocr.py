@@ -12,6 +12,7 @@ from typing import Any, Optional
 from loguru import logger
 from PIL import Image
 
+from src.config.llm import LLMCallType, get_llm_params
 from src.evidence.chain import Evidence, EvidenceSource
 from src.scoring.scorer import GeoScorer
 
@@ -39,10 +40,15 @@ LANGUAGES_DETECTED: [comma-separated list]
 async def extract_text(
     image_path: str,
     client: Any,
-    model: str = "google/gemini-2.5-flash",
+    settings: Optional[Any] = None,
 ) -> dict[str, list[str]]:
     """Extract text from image using VLM.
 
+    Args:
+        image_path: Path to the image file
+        client: OpenAI-compatible async client
+        settings: Settings object with LLM configuration
+        
     Returns dict with keys: street_signs, business_names, building_info,
     license_plates, informational, languages.
     """
@@ -50,10 +56,16 @@ async def extract_text(
 
     try:
         image_url = _encode_image(image_path)
+        
+        # Get LLM params from centralized config
+        if settings is None:
+            from src.config.settings import get_settings
+            settings = get_settings()
+        llm_params = get_llm_params(LLMCallType.OCR, settings)
 
         resp = await execute_with_retry(
             client.chat.completions.create,
-            model=model,
+            **llm_params,
             messages=[
                 {
                     "role": "user",
@@ -63,8 +75,6 @@ async def extract_text(
                     ],
                 }
             ],
-            temperature=0.0,
-            max_tokens=2000,
             max_attempts=2,
             base_delay=2.0,
         )

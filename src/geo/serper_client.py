@@ -18,7 +18,7 @@ from src.cache.decorators import cached
 from src.cache.store import CacheStore
 from src.evidence.chain import Evidence, EvidenceSource
 from src.geo.confidence import calculate_search_confidence, safe_coords
-from src.geo.country_codes import extract_country_from_hint, get_google_cr, get_google_gl
+from src.geo.country_codes import extract_country_from_location, get_google_cr, get_google_gl
 from src.geo.provider_base import SearchProvider
 
 
@@ -69,7 +69,7 @@ class SerperClient(SearchProvider):
             
             # Apply geographic constraints if country hint provided
             if country_hint:
-                iso_code = extract_country_from_hint(country_hint)
+                iso_code = extract_country_from_location(country_hint)
                 if iso_code:
                     # Set geolocation to prioritize local results
                     payload["gl"] = get_google_gl(iso_code)
@@ -198,7 +198,7 @@ class SerperClient(SearchProvider):
             
             # Apply geographic constraints
             if country_hint:
-                iso_code = extract_country_from_hint(country_hint)
+                iso_code = extract_country_from_location(country_hint)
                 if iso_code:
                     payload["gl"] = get_google_gl(iso_code)
                     cr = get_google_cr(iso_code)
