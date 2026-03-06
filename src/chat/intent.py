@@ -1,13 +1,15 @@
-"""Chat intent classification via LLM."""
+"""Chat intent classification via LLM with configurable pattern fallback."""
 
 from __future__ import annotations
 
-import json
-import re
 from enum import Enum
+from typing import Optional
 
 from loguru import logger
 from openai import AsyncOpenAI
+
+from src.patterns import PatternRegistry, classify_intent as pattern_classify_intent
+from src.config.llm import LLMCallType, get_llm_params
 
 
 class ChatIntent(str, Enum):
@@ -20,14 +22,23 @@ class ChatIntent(str, Enum):
     GENERAL = "general"               # General question
 
 
+# Map string intent names to enum values
+INTENT_MAP = {intent.value: intent for intent in ChatIntent}
+
+
 CLASSIFY_PROMPT = """Classify the user's follow-up message into one of these intents:
-- ask_why_not: User asks why a particular location was not chosen (e.g., "why not Turkey?")
-- zoom_feature: User asks about a specific visual feature (e.g., "what does the sign say?")
-- try_search: User wants to trigger a new search query (e.g., "try searching for X")
-- compare: User wants to compare two candidates (e.g., "compare #1 and #2")
-- explain: User wants explanation of evidence (e.g., "explain why Paris")
-- refine_hint: User provides a location hint (e.g., "I think it's in Southeast Asia")
-- general: General question or comment
+- ask_why_not: User asks why a particular location was not chosen (e.g., "why not Turkey?", "why isn't it Greece?")
+- zoom_feature: User asks about a specific visual feature (e.g., "what does the sign say?", "zoom into the building")
+- try_search: User wants to trigger a new search with specific terms (e.g., "try searching for X", "google the restaurant name")
+- compare: User wants to compare two candidates (e.g., "compare #1 and #2", "difference between top candidates")
+- explain: User wants explanation of evidence (e.g., "explain why Paris", "what evidence supports this?")
+- refine_hint: User provides a location hint to narrow down the search area (e.g., "I think it's in Southeast Asia", "narrow it down to Turkey", "around Istanbul", "the image is from Germany")
+- general: General question or comment not matching other intents
+
+IMPORTANT DISTINCTIONS:
+- "try searching for [business name]" → try_search (user wants to search for a specific thing)
+- "I think it's in [place]" or "narrow it down to [place]" → refine_hint (user provides location context for fresh discovery)
+- "why not [place]?" → ask_why_not (user questions why a location wasn't chosen)
 
 User message: {message}
 
@@ -36,38 +47,62 @@ Respond with only the intent name (one of the above), nothing else."""
 
 async def classify_intent(
     message: str,
-    client: AsyncOpenAI,
-    model: str = "google/gemini-2.5-flash",
+    client: Optional[AsyncOpenAI] = None,
+    settings: Optional[Any] = None,
+    use_llm: bool = True,
 ) -> ChatIntent:
-    """Classify user message into a ChatIntent."""
-    try:
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": CLASSIFY_PROMPT.format(message=message)}],
-            temperature=0.0,
-            max_tokens=50,
-        )
-        raw = resp.choices[0].message.content.strip().lower()
+    """Classify user message into a ChatIntent.
+    
+    Uses LLM for classification when available, with configurable pattern
+    matching as fallback (no hardcoded patterns in code).
+    
+    Args:
+        message: User's message to classify
+        client: OpenAI client (optional, if None uses pattern matching only)
+        settings: Settings object with LLM configuration
+        use_llm: Whether to try LLM first (default True)
+        
+    Returns:
+        ChatIntent enum value
+    """
+    # Try LLM classification first if client provided and use_llm is True
+    if use_llm and client is not None and settings is not None:
+        try:
+            params = get_llm_params(LLMCallType.INTENT_CLASSIFY, settings)
+            resp = await client.chat.completions.create(
+                **params,
+                messages=[{"role": "user", "content": CLASSIFY_PROMPT.format(message=message)}],
+            )
+            raw = resp.choices[0].message.content.strip().lower()
 
-        # Try to match to enum
-        for intent in ChatIntent:
-            if intent.value in raw:
-                return intent
+            # Try to match to enum
+            for intent in ChatIntent:
+                if intent.value in raw:
+                    return intent
 
-        return ChatIntent.GENERAL
+            # If LLM returned something we don't recognize, fall through to pattern matching
+            logger.debug("LLM returned unknown intent '{}', using pattern fallback", raw)
+            
+        except Exception as e:
+            logger.warning("Intent classification failed: {}", e)
+            # Fall through to pattern matching
+    
+    # Use configurable pattern matching as fallback (or primary if no client)
+    intent_name, confidence = pattern_classify_intent(message)
+    
+    # Map string to enum
+    intent = INTENT_MAP.get(intent_name)
+    if intent:
+        return intent
+    
+    logger.debug("Pattern matching returned unknown intent '{}', defaulting to GENERAL", intent_name)
+    return ChatIntent.GENERAL
 
-    except Exception as e:
-        logger.warning("Intent classification failed: {}", e)
-        # Fallback heuristics
-        msg = message.lower()
-        if "why not" in msg or "why isn't" in msg:
-            return ChatIntent.ASK_WHY_NOT
-        if "try search" in msg or "search for" in msg:
-            return ChatIntent.TRY_SEARCH
-        if "compare" in msg:
-            return ChatIntent.COMPARE
-        if "explain" in msg or "why" in msg:
-            return ChatIntent.EXPLAIN
-        if "i think" in msg or "it's in" in msg or "probably" in msg:
-            return ChatIntent.REFINE_HINT
-        return ChatIntent.GENERAL
+
+def classify_intent_sync(message: str) -> ChatIntent:
+    """Synchronous intent classification using pattern matching only.
+    
+    Useful when you don't have async context or LLM client.
+    """
+    intent_name, confidence = pattern_classify_intent(message)
+    return INTENT_MAP.get(intent_name, ChatIntent.GENERAL)

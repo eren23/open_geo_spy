@@ -9,11 +9,12 @@ from __future__ import annotations
 import base64
 import io
 import json
-from typing import Any
+from typing import Any, Optional
 
 from loguru import logger
 from PIL import Image
 
+from src.config.llm import LLMCallType, get_llm_params
 from src.evidence.chain import Evidence, EvidenceSource
 from src.scoring.scorer import GeoScorer
 
@@ -98,7 +99,7 @@ Extract ALL visual features that could help identify the location. Return a JSON
 async def extract_visual_features(
     image_path: str,
     client: Any,
-    model: str = "google/gemini-2.5-flash",
+    settings: Optional[Any] = None,
     location_hint: str | None = None,
 ) -> dict[str, Any]:
     """Extract visual features from image using VLM.
@@ -106,7 +107,7 @@ async def extract_visual_features(
     Args:
         image_path: Path to the image file
         client: OpenAI-compatible async client
-        model: Model to use for extraction
+        settings: Settings object with LLM configuration
         location_hint: Optional user-provided location hint to guide analysis
 
     Returns structured feature dict for geolocation analysis.
@@ -115,6 +116,12 @@ async def extract_visual_features(
 
     try:
         image_url = _encode_image(image_path)
+        
+        # Get LLM params from centralized config
+        if settings is None:
+            from src.config.settings import get_settings
+            settings = get_settings()
+        llm_params = get_llm_params(LLMCallType.FEATURE_EXTRACTION, settings)
 
         # Use hint-aware prompt if location hint is provided
         if location_hint:
@@ -125,7 +132,7 @@ async def extract_visual_features(
 
         resp = await execute_with_retry(
             client.chat.completions.create,
-            model=model,
+            **llm_params,
             messages=[
                 {
                     "role": "user",
@@ -135,8 +142,6 @@ async def extract_visual_features(
                     ],
                 }
             ],
-            temperature=0.0,
-            max_tokens=2000,
             max_attempts=2,
             base_delay=2.0,
         )
