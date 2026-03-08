@@ -93,6 +93,7 @@ class SearchGraph:
     root_ids: list[str] = field(default_factory=list)
     failed_patterns: list[str] = field(default_factory=list)  # P1.8: Track failed query patterns
     max_retries: int = 2  # P1.7: Max retries before pruning
+    max_retries_initial: int = 3  # More retries for INITIAL nodes (obscure places often return 0)
     metadata: dict[str, Any] = field(default_factory=dict)  # Store hints and other context
 
     def add_node(
@@ -157,21 +158,34 @@ class SearchGraph:
         return productive
 
     def dead_ends(self) -> list[str]:
-        """Return node IDs that completed with zero evidence and exceeded retries."""
-        return [
-            n.id for n in self.nodes.values()
-            if n.status == SearchNodeStatus.COMPLETED 
-            and n.evidence_count == 0 
-            and n.retry_count >= self.max_retries  # P1.7: Only prune after N retries
-        ]
+        """Return node IDs that completed with zero evidence and exceeded retries.
+
+        INITIAL nodes get more retries (max_retries_initial) since queries for
+        obscure places often return 0 results initially.
+        Does not prune nodes that have pending children (let them run first).
+        """
+        dead = []
+        for n in self.nodes.values():
+            if n.status != SearchNodeStatus.COMPLETED or n.evidence_count != 0:
+                continue
+            # Don't prune if we have pending children (BROADEN may find results)
+            children = self.get_children(n.id)
+            if any(c.status == SearchNodeStatus.PENDING for c in children):
+                continue
+            max_allowed = self.max_retries_initial if n.intent == QueryIntent.INITIAL else self.max_retries
+            if n.retry_count >= max_allowed:
+                dead.append(n.id)
+        return dead
 
     def retryable_dead_ends(self) -> list[str]:
         """Return node IDs that completed with zero evidence but can be retried (P1.7)."""
         return [
             n.id for n in self.nodes.values()
-            if n.status == SearchNodeStatus.COMPLETED 
-            and n.evidence_count == 0 
-            and n.retry_count < self.max_retries
+            if n.status == SearchNodeStatus.COMPLETED
+            and n.evidence_count == 0
+            and n.retry_count < (
+                self.max_retries_initial if n.intent == QueryIntent.INITIAL else self.max_retries
+            )
         ]
 
     def prune_branch(self, node_id: str) -> None:
@@ -198,20 +212,35 @@ class SearchGraph:
     def suggest_expansions(self, max_suggestions: int = 5) -> list[dict]:
         """Suggest new queries based on graph analysis.
 
-        Returns list of dicts: {"parent_id", "query_template", "intent", "reason"}
+        Returns list of dicts: {"parent_id", "query_template", "intent", "reason"}.
+        Includes BROADEN for 0-evidence nodes so obscure places get a broader
+        query before pruning (reduces urban bias from over-pruning sparse results).
         """
         suggestions = []
 
-        # Find productive nodes that haven't been expanded
         for node in self.nodes.values():
             if node.status != SearchNodeStatus.COMPLETED:
-                continue
-            if node.evidence_count == 0:
                 continue
 
             children = self.get_children(node.id)
             if len(children) >= 3:
                 continue  # Already well-expanded
+
+            # For 0-evidence nodes: suggest BROADEN to try broader query before pruning
+            if node.evidence_count == 0:
+                if not any(c.intent == QueryIntent.BROADEN for c in children):
+                    # Broader query: drop last token or add "area region"
+                    words = node.query.split()
+                    broader = f"{node.query} area region" if len(words) <= 3 else " ".join(words[:-1])
+                    suggestions.append({
+                        "parent_id": node.id,
+                        "query_template": broader,
+                        "intent": QueryIntent.BROADEN,
+                        "reason": f"Zero results, try broader query before pruning",
+                    })
+                if len(suggestions) >= max_suggestions:
+                    break
+                continue
 
             # Suggest refinement for high-evidence nodes
             if node.best_confidence > 0.5 and not any(
@@ -224,7 +253,7 @@ class SearchGraph:
                     "reason": f"High-confidence node ({node.best_confidence:.2f}) not yet refined",
                 })
 
-            # Suggest broadening for narrow results
+            # Suggest broadening for narrow results (1 evidence)
             if node.evidence_count < 2 and not any(
                 c.intent == QueryIntent.BROADEN for c in children
             ):

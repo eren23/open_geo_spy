@@ -30,6 +30,7 @@ class SampleResult:
     gt_country: str = ""
     gt_city: str = ""
     difficulty: str = "medium"
+    urban_rural: str = ""  # urban, suburban, rural, remote — for bias stratification
     tags: list[str] = field(default_factory=list)
 
     cost_usd: float = 0.0
@@ -176,6 +177,18 @@ class EvalMetrics:
         for r in self.results:
             groups.setdefault(r.difficulty, []).append(r)
         return {d: EvalMetrics(results=rs) for d, rs in groups.items()}
+
+    def by_urban_rural(self) -> dict[str, EvalMetrics]:
+        """Break down metrics by urban/rural tier for bias analysis.
+
+        urban_rural values: urban, suburban, rural, remote.
+        Samples without urban_rural are grouped as 'unspecified'.
+        """
+        groups: dict[str, list[SampleResult]] = {}
+        for r in self.results:
+            key = r.urban_rural.strip() if r.urban_rural else "unspecified"
+            groups.setdefault(key, []).append(r)
+        return {k: EvalMetrics(results=rs) for k, rs in groups.items()}
 
     def by_tag(self, tag: str) -> EvalMetrics:
         """Filter metrics to samples with a given tag."""

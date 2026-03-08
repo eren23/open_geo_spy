@@ -58,6 +58,7 @@ class EvalRunner:
                     gt_country=dataset.samples[i].country,
                     gt_city=dataset.samples[i].city,
                     difficulty=dataset.samples[i].difficulty,
+                    urban_rural=dataset.samples[i].urban_rural,
                     tags=dataset.samples[i].tags,
                 ))
 
@@ -96,6 +97,7 @@ class EvalRunner:
                 gt_country=sample.country,
                 gt_city=sample.city,
                 difficulty=sample.difficulty,
+                urban_rural=sample.urban_rural,
                 tags=sample.tags,
                 latency_ms=duration_ms,
             )
@@ -108,5 +110,6 @@ class EvalRunner:
                 gt_country=sample.country,
                 gt_city=sample.city,
                 difficulty=sample.difficulty,
+                urban_rural=sample.urban_rural,
                 tags=sample.tags,
             )
