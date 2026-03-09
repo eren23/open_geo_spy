@@ -71,6 +71,20 @@ class EvalReport:
                     f"country={ds['country_accuracy']:.1%}"
                 )
 
+        # Per urban/rural breakdown (bias stratification)
+        by_ur = self.metrics.by_urban_rural()
+        if len(by_ur) > 1 or (len(by_ur) == 1 and "unspecified" not in by_ur):
+            lines.extend(["", "  By Urban/Rural (bias):"])
+            for tier, m in sorted(by_ur.items()):
+                ds = m.summary()
+                lines.append(
+                    f"    {tier:12s}: n={ds['count']:3d}  "
+                    f"median={ds['median_gcd_km']:7.1f}km  "
+                    f"@25km={ds['accuracy_25km']:.1%}  "
+                    f"@150km={ds['accuracy_150km']:.1%}  "
+                    f"country={ds['country_accuracy']:.1%}"
+                )
+
         lines.append(f"{'='*60}")
         return "\n".join(lines)
 
@@ -104,6 +118,9 @@ class EvalReport:
             "metrics": self.metrics.summary(),
             "by_difficulty": {
                 d: m.summary() for d, m in self.metrics.by_difficulty().items()
+            },
+            "by_urban_rural": {
+                k: m.summary() for k, m in self.metrics.by_urban_rural().items()
             },
         }
         if self.baseline:

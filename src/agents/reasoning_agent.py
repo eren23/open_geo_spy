@@ -470,8 +470,21 @@ class ReasoningAgent:
                     clusters_dict[label] = []
                 clusters_dict[label].append(evidence)
 
-            # Sort clusters by size descending
-            clusters = sorted(clusters_dict.values(), key=len, reverse=True)
+            # Sort by composite score (not pure size) to reduce urban bias:
+            # 0.6 * normalized_size + 0.4 * avg_confidence
+            # Prevents "biggest cluster wins" from always favoring dense urban areas
+            cluster_list = list(clusters_dict.values())
+            max_size = max(len(c) for c in cluster_list) if cluster_list else 1
+
+            def _cluster_score(cluster: list[Evidence]) -> float:
+                norm_size = len(cluster) / max_size if max_size > 0 else 0
+                avg_conf = (
+                    sum(e.confidence for e in cluster) / len(cluster)
+                    if cluster else 0.0
+                )
+                return 0.6 * norm_size + 0.4 * avg_conf
+
+            clusters = sorted(cluster_list, key=_cluster_score, reverse=True)
             return clusters
 
         except Exception:
@@ -504,7 +517,18 @@ class ReasoningAgent:
 
                 clusters.append(cluster)
 
-            clusters.sort(key=len, reverse=True)
+            # Sort by composite score (not pure size) to reduce urban bias
+            max_size = max(len(c) for c in clusters) if clusters else 1
+
+            def _cluster_score(cluster: list[Evidence]) -> float:
+                norm_size = len(cluster) / max_size if max_size > 0 else 0
+                avg_conf = (
+                    sum(e.confidence for e in cluster) / len(cluster)
+                    if cluster else 0.0
+                )
+                return 0.6 * norm_size + 0.4 * avg_conf
+
+            clusters.sort(key=_cluster_score, reverse=True)
             return clusters
 
     def _rank_candidates(
@@ -532,7 +556,24 @@ class ReasoningAgent:
                 if isinstance(e, dict):
                     source_set.add(e.get("source", ""))
 
-            visual_match = c.get("visual_match_score", 0) or 0
+            # Use neutral default when no visual verification (e.g. no Mapillary coverage).
+            # Rural areas often have zero imagery; don't penalize vs urban candidates.
+            trail = c.get("evidence_trail", [])
+            visual_evidences = [
+                e for e in trail
+                if isinstance(e, dict) and e.get("source") == "visual_match"
+            ]
+            if visual_evidences:
+                visual_match = max(
+                    e.get("confidence", 0) for e in visual_evidences
+                )
+            else:
+                raw_visual = c.get("visual_match_score") or 0
+                visual_match = (
+                    raw_visual
+                    if raw_visual > 0
+                    else self.scorer.config.visual_match.neutral_when_unverified
+                )
             raw_conf = c.get("confidence", 0)
 
             country_match = self.scorer.country_match_score(

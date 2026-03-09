@@ -19,6 +19,7 @@ class GroundTruthSample:
     city: str = ""
     region: str = ""
     difficulty: str = "medium"  # easy, medium, hard
+    urban_rural: str = ""  # urban, suburban, rural, remote — for bias stratification
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -31,6 +32,7 @@ class GroundTruthSample:
             "city": self.city,
             "region": self.region,
             "difficulty": self.difficulty,
+            "urban_rural": self.urban_rural,
             "tags": self.tags,
             "metadata": self.metadata,
         }
@@ -85,6 +87,7 @@ class EvalDataset:
                 city=s.get("city", ""),
                 region=s.get("region", ""),
                 difficulty=s.get("difficulty", "medium"),
+                urban_rural=s.get("urban_rural", ""),
                 tags=s.get("tags", []),
                 metadata=s.get("metadata", {}),
             ))
@@ -114,6 +117,7 @@ class EvalDataset:
                     city=row.get("city", ""),
                     region=row.get("region", ""),
                     difficulty=row.get("difficulty", "medium"),
+                    urban_rural=row.get("urban_rural", ""),
                     tags=row.get("tags", "").split(",") if row.get("tags") else [],
                 ))
 

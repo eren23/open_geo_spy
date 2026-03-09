@@ -629,7 +629,9 @@ async def reasoning_node(
         try:
             from src.scoring.grounding import GroundingEngine
             from src.scoring.hierarchy import HierarchicalResolver
-            resolver = HierarchicalResolver(engine=GroundingEngine())
+            scoring_config = get_scoring_config()
+            engine = GroundingEngine(params=scoring_config.grounding)
+            resolver = HierarchicalResolver(engine=engine)
             hier_pred = resolver.resolve(prediction, evidence_chain)
             for level_g in hier_pred.groundings.values():
                 grounding_event = {

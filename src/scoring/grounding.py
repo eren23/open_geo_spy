@@ -4,6 +4,10 @@ Replaces opaque ``confidence=0.72`` with explainable verdicts like
 ``GROUNDED (3 supporting from 2 sources, 0 contradicting)``.
 
 Inspired by visionbot's GroundingResult pattern.
+
+Supports configurable/adaptive thresholds for sparse evidence (rural/small-town):
+when total evidence in chain is low, relaxed thresholds allow 1-2 strong evidence
+items to achieve SUPPORTED/GROUNDED instead of always UNCERTAIN.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from enum import Enum
 from typing import Optional
 
 from src.evidence.chain import Evidence, EvidenceChain
+from src.scoring.config import GroundingParams
 from src.utils.geo_math import haversine_distance
 
 
@@ -60,10 +65,12 @@ class GroundingEngine:
         proximity_km: float = 200.0,
         tight_proximity_km: float = 50.0,
         min_sources_for_grounded: int = 2,
+        params: GroundingParams | None = None,
     ):
         self.proximity_km = proximity_km
         self.tight_proximity_km = tight_proximity_km
         self.min_sources_for_grounded = min_sources_for_grounded
+        self.params = params or GroundingParams()
 
     def ground_country(
         self,
@@ -92,8 +99,11 @@ class GroundingEngine:
             else:
                 contradicting.append(e)
 
-        return self._compute_verdict(supporting, contradicting, sources,
-                                      f"country={country}")
+        return self._compute_verdict(
+            supporting, contradicting, sources,
+            f"country={country}",
+            total_evidence_count=len(chain.evidences),
+        )
 
     def ground_coordinates(
         self,
@@ -114,8 +124,11 @@ class GroundingEngine:
             elif dist > self.proximity_km * 5:
                 contradicting.append(e)
 
-        return self._compute_verdict(supporting, contradicting, sources,
-                                      f"coords=({lat:.4f}, {lon:.4f})")
+        return self._compute_verdict(
+            supporting, contradicting, sources,
+            f"coords=({lat:.4f}, {lon:.4f})",
+            total_evidence_count=len(chain.evidences),
+        )
 
     def ground_region(
         self,
@@ -150,8 +163,11 @@ class GroundingEngine:
                 # Same country but different region
                 contradicting.append(e)
 
-        return self._compute_verdict(supporting, contradicting, sources,
-                                      f"region={region}")
+        return self._compute_verdict(
+            supporting, contradicting, sources,
+            f"region={region}",
+            total_evidence_count=len(chain.evidences),
+        )
 
     def ground_city(
         self,
@@ -180,8 +196,11 @@ class GroundingEngine:
             else:
                 contradicting.append(e)
 
-        return self._compute_verdict(supporting, contradicting, sources,
-                                      f"city={city}")
+        return self._compute_verdict(
+            supporting, contradicting, sources,
+            f"city={city}",
+            total_evidence_count=len(chain.evidences),
+        )
 
     def _compute_verdict(
         self,
@@ -189,11 +208,26 @@ class GroundingEngine:
         contradicting: list[Evidence],
         sources: set[str],
         claim_desc: str,
+        total_evidence_count: int = 999,
     ) -> GroundingResult:
-        """Compute verdict from supporting/contradicting evidence counts."""
+        """Compute verdict from supporting/contradicting evidence counts.
+
+        Uses adaptive thresholds when total evidence is sparse: relaxed
+        min_supporting allows rural/small-town images with 1-2 strong
+        evidence items to achieve SUPPORTED/GROUNDED.
+        """
         n_sup = len(supporting)
         n_con = len(contradicting)
         n_sources = len(sources)
+        p = self.params
+
+        # Adaptive threshold: use relaxed min_supporting when evidence is sparse
+        min_sup_for_grounded = (
+            p.min_supporting_for_grounded_sparse
+            if total_evidence_count < p.sparse_evidence_threshold
+            else p.min_supporting_for_grounded
+        )
+        min_sources = p.min_sources_for_grounded
 
         if n_sup == 0 and n_con == 0:
             return GroundingResult(
@@ -211,7 +245,7 @@ class GroundingEngine:
         elif n_con > 0 and n_con >= n_sup / 2:
             verdict = GroundingVerdict.WEAKENED
             confidence = 0.3 + 0.2 * (n_sup / (n_sup + n_con))
-        elif n_sources >= self.min_sources_for_grounded and n_sup >= 3:
+        elif n_sources >= min_sources and n_sup >= min_sup_for_grounded:
             verdict = GroundingVerdict.GROUNDED
             confidence = min(0.95, 0.6 + 0.1 * min(n_sources, 4))
         elif n_sup >= 1:

@@ -67,16 +67,20 @@ class EnsembleBlend(BaseModel):
 
 
 class CandidateRankingWeights(BaseModel):
-    """Weights for the composite candidate ranking score."""
+    """Weights for the composite candidate ranking score.
 
-    confidence: float = 0.35  # Slightly reduced
-    evidence_count: float = 0.10
-    source_diversity: float = 0.10
+    Tuned to reduce urban/big-city bias: lower evidence_count and source_diversity
+    weights so places with more indexed content don't automatically rank higher.
+    """
+
+    confidence: float = 0.45  # Increased: favor per-evidence quality over quantity
+    evidence_count: float = 0.05  # Reduced: less reward for "more evidence = better"
+    source_diversity: float = 0.05  # Reduced: cities naturally have more sources
     visual_match: float = 0.15
-    country_match: float = 0.30  # Increased from 0.25
+    country_match: float = 0.30
     country_match_with_hint: float = 0.45  # Even higher when user hint present
     evidence_count_cap: int = 5
-    evidence_count_normalizer: float = 5.0
+    evidence_count_normalizer: float = 3.0  # Cap benefit earlier: 3 vs 10 evidence matters less
     source_diversity_normalizer: float = 5.0
 
 
@@ -148,6 +152,9 @@ class VisualMatchMapping(BaseModel):
     low_confidence: float = 0.1
     high_similarity: float = 0.98
     high_confidence: float = 0.95
+    # Neutral default when candidate was not verified (no Mapillary/ref images).
+    # Rural areas often have zero coverage; don't penalize vs urban candidates.
+    neutral_when_unverified: float = 0.5
 
 
 class EnvironmentEvidenceWeights(BaseModel):
@@ -189,12 +196,16 @@ class RefinementThresholds(BaseModel):
 
 
 class ClusteringParams(BaseModel):
-    """Geographic clustering parameters."""
+    """Geographic clustering parameters.
+
+    max_evidence_per_candidate reduced to cap urban advantage from evidence
+    redistribution (dense urban clusters can pull in many nearby evidences).
+    """
 
     eps_km: float = 50.0
     cluster_confidence_decay: float = 0.8
     evidence_redistribution_radius_km: float = 200.0
-    max_evidence_per_candidate: int = 15
+    max_evidence_per_candidate: int = 10  # Reduced from 15 to cap urban cluster advantage
 
 
 class FallbackParams(BaseModel):
@@ -209,6 +220,19 @@ class CandidateVerificationParams(BaseModel):
     max_candidates: int = 8
     max_refs_per_candidate: int = 5
     mapillary_radius_m: int = 500
+
+
+class GroundingParams(BaseModel):
+    """Configurable grounding thresholds for sparse evidence (rural/small-town).
+
+    When total evidence in chain is low, relax thresholds so 1-2 strong evidence
+    items can achieve SUPPORTED/GROUNDED instead of always UNCERTAIN.
+    """
+
+    min_supporting_for_grounded: int = 3
+    min_supporting_for_grounded_sparse: int = 2  # When total evidence < sparse_threshold
+    min_sources_for_grounded: int = 2
+    sparse_evidence_threshold: int = 5  # Use relaxed thresholds when chain has fewer evidences
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +258,7 @@ class ScoringConfig(BaseModel):
     clustering: ClusteringParams = ClusteringParams()
     fallback: FallbackParams = FallbackParams()
     candidate_verification: CandidateVerificationParams = CandidateVerificationParams()
+    grounding: GroundingParams = GroundingParams()
 
     @classmethod
     def from_file(cls, path: str | Path) -> ScoringConfig:

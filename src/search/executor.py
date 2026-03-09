@@ -134,32 +134,33 @@ class SearchGraphExecutor:
             )
             combined.add_many(layer_chain.evidences)
 
-            # Prune dead ends
-            for dead_id in graph.dead_ends():
-                # Don't prune initial nodes
-                node = graph.nodes.get(dead_id)
-                if node and node.intent != QueryIntent.INITIAL:
-                    graph.prune_branch(dead_id)
-
-            # Expand using the expander (if provided)
+            # Expand first (including BROADEN for 0-evidence nodes) so we try
+            # broader queries before pruning obscure-place results
             if expander and depth < max_depth - 1:
                 suggestions = expander.suggest(graph, combined)
-                for s in suggestions:
+            else:
+                suggestions = graph.suggest_expansions(max_suggestions=3)
+
+            for s in suggestions:
+                if expander:
                     graph.add_node(
                         query=s["query"],
                         intent=s.get("intent", QueryIntent.REFINE),
                         provider=s.get("provider", "serper"),
                         parent_id=s.get("parent_id"),
                     )
-            else:
-                # Use graph's built-in heuristic suggestions
-                suggestions = graph.suggest_expansions(max_suggestions=3)
-                for s in suggestions:
+                else:
                     graph.add_node(
                         query=s["query_template"],
                         intent=s["intent"],
                         parent_id=s["parent_id"],
                     )
+
+            # Prune dead ends (after expansion so BROADEN children get a chance)
+            for dead_id in graph.dead_ends():
+                node = graph.nodes.get(dead_id)
+                if node and node.intent != QueryIntent.INITIAL:
+                    graph.prune_branch(dead_id)
 
         return combined
 
