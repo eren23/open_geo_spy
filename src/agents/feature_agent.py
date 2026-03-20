@@ -59,15 +59,30 @@ class FeatureExtractionAgent:
                 )
             )
 
-        # Run all extractions in parallel
+        # Run all extractions in parallel, preserving completed results on timeout
         # Pass location_hint to visual feature extraction for hint-aware analysis
-        metadata_task = asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)
-        features_task = visual_features.extract_visual_features(
-            image_path, self.client, self.fast_model, location_hint=location_hint
-        )
-        ocr_task = ocr.extract_text(image_path, self.client, self.fast_model)
+        tasks = [
+            asyncio.ensure_future(asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)),
+            asyncio.ensure_future(visual_features.extract_visual_features(
+                image_path, self.client, self.fast_model, location_hint=location_hint
+            )),
+            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.fast_model)),
+        ]
 
-        results = await asyncio.gather(metadata_task, features_task, ocr_task, return_exceptions=True)
+        done, pending = await asyncio.wait(tasks, timeout=45.0)
+        for t in pending:
+            t.cancel()
+        if pending:
+            logger.warning("Feature extraction: {}/{} tasks timed out after 45s", len(pending), len(tasks))
+
+        results = []
+        for t in tasks:
+            if t in done and t.exception() is None:
+                results.append(t.result())
+            elif t in done and t.exception() is not None:
+                results.append(t.exception())
+            else:
+                results.append(TimeoutError("timed out"))
 
         # Process metadata
         if isinstance(results[0], dict):
@@ -131,13 +146,28 @@ class FeatureExtractionAgent:
                 )
             )
 
-        metadata_task = asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)
-        features_task = visual_features.extract_visual_features(
-            image_path, self.client, self.fast_model, location_hint=location_hint
-        )
-        ocr_task = ocr.extract_text(image_path, self.client, self.fast_model)
+        tasks = [
+            asyncio.ensure_future(asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)),
+            asyncio.ensure_future(visual_features.extract_visual_features(
+                image_path, self.client, self.fast_model, location_hint=location_hint
+            )),
+            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.fast_model)),
+        ]
 
-        results = await asyncio.gather(metadata_task, features_task, ocr_task, return_exceptions=True)
+        done, pending = await asyncio.wait(tasks, timeout=45.0)
+        for t in pending:
+            t.cancel()
+        if pending:
+            logger.warning("Feature extraction: {}/{} tasks timed out after 45s", len(pending), len(tasks))
+
+        results = []
+        for t in tasks:
+            if t in done and t.exception() is None:
+                results.append(t.result())
+            elif t in done and t.exception() is not None:
+                results.append(t.exception())
+            else:
+                results.append(TimeoutError("timed out"))
 
         metadata = results[0] if isinstance(results[0], dict) else {}
         feat = results[1] if isinstance(results[1], dict) else {}

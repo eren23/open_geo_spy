@@ -501,12 +501,10 @@ class TestScoringConfigValues:
     """Tests for scoring config values related to hints."""
     
     def test_hint_vote_multiplier_is_high(self):
-        """Hint vote multiplier should be high for strong hint authority."""
+        """Hint vote multiplier should be moderate (tie-break, not veto)."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # Should be >= 5 for strong hint authority
-        assert config.country_penalty.hint_vote_multiplier >= 5
+        assert 2 <= config.country_penalty.hint_vote_multiplier <= 5
     
     def test_hint_match_boost_is_significant(self):
         """Hint match boost should be significant."""
@@ -519,25 +517,21 @@ class TestScoringConfigValues:
         assert config.hint.strong_match_boost > config.hint.match_boost
     
     def test_no_match_penalty_is_heavy(self):
-        """No-match penalty should be heavy."""
+        """No-match scales confidence down but keeps alternates in play."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # No-match penalty should be significant
-        assert config.hint.no_match_penalty < 0.3
+        assert 0.5 <= config.hint.no_match_penalty <= 0.85
     
     def test_strong_hint_penalty_is_very_heavy(self):
-        """Strong hint penalty should be very heavy."""
+        """Strong hint penalty downranks but does not zero out alternates."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # Should be low to heavily penalize wrong-country candidates
-        assert config.country_penalty.strong_hint_penalty < 0.2
+        assert 0.4 <= config.country_penalty.strong_hint_penalty <= 0.8
     
-    def test_country_match_weight_increases_with_hint(self):
-        """Country match weight should increase when hint is present."""
+    def test_country_match_weight_same_with_hint(self):
+        """Country match weight should be the same with or without hint (hint influence via boost/penalty)."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # country_match_with_hint should be higher than country_match
-        assert config.candidate_ranking.country_match_with_hint > config.candidate_ranking.country_match
+
+        # country_match_with_hint should equal country_match (hint influence via boost/penalty, not extra weight)
+        assert config.candidate_ranking.country_match_with_hint == config.candidate_ranking.country_match

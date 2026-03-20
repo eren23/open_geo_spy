@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 # import requests
 from openai import OpenAI
 from src.image_analysis.environment_classifier import EnvironmentType, EnvironmentInfo
+from src.utils.retry import retry_llm
 
 
 class LocationResolver:
@@ -33,14 +34,15 @@ class LocationResolver:
         env_type = features.get("environment_type", "UNKNOWN")
         env_confidence = features.get("environment_confidence", 0.5)
 
-        # Filter candidates to prioritize those within the hinted region
+        # Prefer hinted region with soft scores; never drop out-of-region candidates outright
         if location_hint:
-            valid_candidates = [c for c in candidates if self._is_within_region(c, location_hint)]
-            if valid_candidates:
-                # Boost confidence for candidates within the hinted region
-                for c in valid_candidates:
-                    c["confidence"] = min(1.0, c.get("confidence", 0.5) * 1.5)
-                candidates = valid_candidates
+            for c in candidates:
+                in_region = self._is_within_region(c, location_hint)
+                base = float(c.get("confidence", 0.5))
+                if in_region is True:
+                    c["confidence"] = min(1.0, base * 1.25)
+                elif in_region is False:
+                    c["confidence"] = max(0.05, base * 0.78)
 
         # Get initial resolution with location hint and environment type
         initial_location = self._initial_resolution(features, candidates, description, location_hint)
@@ -55,10 +57,11 @@ class LocationResolver:
         if initial_location:
             refined_location = self._refine_with_environment_specific_evidence(initial_location, features, env_type, env_confidence)
             if refined_location:
-                # Only use refined location if it's within the hinted region
-                if location_hint and self._is_within_region(refined_location, location_hint):
-                    initial_location = refined_location
-                elif not location_hint:
+                if location_hint:
+                    in_region = self._is_within_region(refined_location, location_hint)
+                    if in_region is not False:
+                        initial_location = refined_location
+                else:
                     initial_location = refined_location
 
         # If we have a location hint, ensure the final location is specific enough
@@ -75,6 +78,9 @@ class LocationResolver:
 
         return initial_location
 
+    # NOTE: Old pipeline — not called from async graph nodes.
+    # Sync retry uses time.sleep(); safe only because this code path is dormant.
+    @retry_llm(max_attempts=2)
     def _initial_resolution(self, features: Dict, candidates: List[Dict], description: str, location_hint: str = None) -> Dict:
         """Initial location resolution using all available information"""
         prompt = self._build_reasoning_prompt(features, candidates, description, location_hint)
@@ -212,10 +218,10 @@ class LocationResolver:
         location_context = ""
         if location_hint:
             location_context = f"""
-            CRITICAL: A specific location of '{location_hint}' has been provided.
-            You MUST prioritize finding evidence that confirms or refutes this location.
-            If evidence supports this location, focus on finding the most specific area WITHIN {location_hint}.
-            Only suggest a different location if there is strong contradictory evidence.
+            Optional context: the user suggested '{location_hint}'.
+            Check whether image clues (text, plates, style, environment) support or contradict it.
+            If clues are ambiguous, lean toward the most specific place consistent with BOTH the hint and the evidence.
+            If clues clearly contradict the hint, choose the evidence-backed location and explain why.
             """
 
         # Extract entity-location associations
@@ -297,16 +303,14 @@ class LocationResolver:
         {candidates_text}
         
         Analysis Instructions:
-        1. If a specific location hint is provided, start by validating it against the evidence
-        2. Look for specific districts or neighborhoods within the suggested area
-        3. Use architectural styles and urban patterns to confirm the region
+        1. If a location hint is provided, test it against concrete clues first
+        2. Prefer districts or neighborhoods when clues support that level of precision
+        3. Use architectural styles and urban patterns to confirm or refute the region
         4. Check if business names and street signs match the expected language/style
         5. Verify if environmental features match the local geography
-        6. Consider the building density and road types for area classification
+        6. Consider building density and road types for area classification
         
-        NEVER default to a country-level location if a more specific location hint is provided.
-        If the evidence supports the hinted location, your confidence should be at least 0.7.
-        Only suggest a different location if you find strong contradictory evidence.
+        Do not force a high confidence from the hint alone; confidence should match real corroboration.
         
         Return your response in this format:
         Location: [most specific name - include city AND district/neighborhood if possible]
@@ -393,8 +397,11 @@ class LocationResolver:
             "type": "merged_prediction",
         }
 
-    def _is_within_region(self, location: Dict, region_hint: str) -> bool:
-        """Check if a location is within the hinted region"""
+    def _is_within_region(self, location: Dict, region_hint: str) -> Optional[bool]:
+        """Check if a location is within the hinted region.
+
+        Returns True/False when the model answers; None when the check fails (caller skips adjustment).
+        """
         try:
             # Use Google Maps geocoding to get region bounds
             completion = self.client.chat.completions.create(
@@ -418,21 +425,26 @@ class LocationResolver:
                     }
                 ],
             )
-            result = completion.choices[0].message.content.strip().lower()
-            return result == "true"
+            raw = completion.choices[0].message.content.strip().lower()
+            cleaned = raw.replace("'", "").replace('"', "").split()[0] if raw else ""
+            if cleaned == "true":
+                return True
+            if cleaned == "false":
+                return False
+            return None
         except Exception as e:
             print(f"Error checking region containment: {e}")
-            return False  # Default to False to avoid false positives
+            return None
 
     def _find_closest_valid_candidate(self, candidates: List[Dict], region_hint: str) -> Optional[Dict]:
-        """Find the closest candidate that is within the hinted region"""
+        """Find the highest-confidence candidate confirmed within the hinted region."""
         valid_candidates = []
         for candidate in candidates:
-            if self._is_within_region(candidate, region_hint):
+            in_region = self._is_within_region(candidate, region_hint)
+            if in_region is True:
                 valid_candidates.append(candidate)
 
         if not valid_candidates:
             return None
 
-        # Return the highest confidence candidate among valid ones
         return max(valid_candidates, key=lambda x: x.get("confidence", 0))

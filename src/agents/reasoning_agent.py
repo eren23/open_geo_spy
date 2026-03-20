@@ -24,6 +24,7 @@ from src.config.llm import LLMCallType, get_llm_params
 from src.evidence.chain import Evidence, EvidenceChain, EvidenceSource
 from src.evidence.verifier import LocationVerifier
 from src.scoring.scorer import GeoScorer
+from src.utils.retry import execute_with_retry
 
 REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evidence below, determine the most precise location possible.
 
@@ -44,20 +45,22 @@ REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evide
 {location_hint}
 
 ## CRITICAL INSTRUCTIONS
-1. **USER HINT IS AUTHORITATIVE**: If a user location hint is provided above, you MUST prioritize it above ALL other evidence. The user has contextual knowledge you don't have. Even if ML models suggest elsewhere, prefer the hinted region.
+1. **Evidence over vibes**: Ground the answer in concrete clues—OCR (plates, signs, business names), visual_match scores, and multi-source geographic agreement. A user hint is context, not proof.
 
-2. **Discordant evidence handling**: If ML models predict different countries than the hint, the hint wins. Mark the ML predictions as "contradicted by user knowledge" in your reasoning.
+2. **Hints are a soft prior**: If a user hint is provided, use it to break ties and to search *within* that area when clues are ambiguous. If strong independent evidence (e.g. legible plates, language, architecture, tight coordinate cluster, high visual_match) clearly contradicts the hint, follow the evidence, explain the conflict, and lower confidence.
 
-3. Weigh evidence by source reliability and mutual corroboration
-4. Prioritize evidence that multiple independent sources agree on
-5. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
-6. Country-level agreement across models is highly diagnostic
-7. OCR text (signs, plates, businesses) provides regional/local specificity
-8. Be SPECIFIC - neighborhood > city > region > country
-9. Confidence MUST reflect actual evidence strength, NOT be inflated
-10. Visual match evidence (source=visual_match) compares the query image against reference photos
+3. **Discordant evidence**: When the hint and models disagree, do NOT discard the contradiction—compare reliability (e.g. vague hint vs. specific plate region) and say which side you trust and why.
+
+4. Weigh evidence by source reliability and mutual corroboration
+5. Prioritize evidence that multiple independent sources agree on
+6. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
+7. Country-level agreement across models is highly diagnostic
+8. OCR text (signs, plates, businesses) provides regional/local specificity
+9. Be SPECIFIC - neighborhood > city > region > country
+10. Confidence MUST reflect actual evidence strength, NOT be inflated
+11. Visual match evidence (source=visual_match) compares the query image against reference photos
    of candidate locations. HIGH similarity is strong evidence for that specific location.
-   This is the BEST evidence for distinguishing between same-category candidates (e.g., two hotels in the same city).
+   This is among the best evidence for distinguishing same-category candidates (e.g. two hotels in one city).
 
 Return your answer as JSON:
 {{
@@ -95,11 +98,22 @@ class ReasoningAgent:
             self.verifier = LocationVerifier(self.client, self.settings.llm.fast_model)
             self._verifier_client = self.client
 
+    def _remaining_budget_s(self, started_at_monotonic: float) -> float:
+        """Return remaining wall-clock budget in seconds, or a generous default."""
+        if started_at_monotonic <= 0:
+            return 45.0  # No budget tracking → use per-call default
+        import time as _time
+        elapsed_ms = (_time.monotonic() - started_at_monotonic) * 1000.0
+        budget_ms = self.settings.pipeline.max_total_latency_ms
+        remaining = max(5.0, (budget_ms - elapsed_ms) / 1000.0)
+        return remaining
+
     async def reason(
         self,
         evidence_chain: EvidenceChain,
         features: dict[str, Any] | None = None,
         skip_verification: bool = False,
+        started_at_monotonic: float = 0.0,
     ) -> dict[str, Any]:
         """Synthesize all evidence into a final location prediction.
 
@@ -108,6 +122,7 @@ class ReasoningAgent:
             features: Raw visual features (for environment type)
             skip_verification: When True, skip CoVe verification (used by chat handlers
                 for faster re-reasoning)
+            started_at_monotonic: Pipeline start time (time.monotonic()) for budget tracking.
 
         Returns:
             Final prediction dict with location, confidence, reasoning, evidence trail.
@@ -127,11 +142,13 @@ class ReasoningAgent:
 
         # Extract location hint from evidence chain
         hint_text = "No hint provided"
-        hint_raw = None
         for e in evidence_chain.evidences:
             if e.source == EvidenceSource.USER_HINT:
                 hint_raw = e.metadata.get("hint", e.content)
-                hint_text = f"User says the image is from: {hint_raw} (STRONGLY prefer locations matching this hint)"
+                hint_text = (
+                    f"User context (may be wrong or vague): {hint_raw}. "
+                    "Use as tie-breaker when clues are weak; do not override strong contradictory evidence."
+                )
                 break
 
         prompt = REASONING_PROMPT.format(
@@ -148,9 +165,13 @@ class ReasoningAgent:
         # Primary reasoning
         try:
             llm_params = get_llm_params(LLMCallType.REASONING, self.settings)
-            resp = await self.client.chat.completions.create(
+            reasoning_timeout = min(45.0, self._remaining_budget_s(started_at_monotonic))
+            resp = await execute_with_retry(
+                self.client.chat.completions.create,
                 **llm_params,
                 messages=[{"role": "user", "content": prompt}],
+                max_attempts=2,
+                total_timeout=reasoning_timeout,
             )
             prediction = _parse_prediction(resp.choices[0].message.content)
             if prediction.get("reasoning") == "Parse failed":
@@ -169,9 +190,10 @@ class ReasoningAgent:
         if skip_verification:
             prediction["verified"] = False
         else:
+            verification_budget = self._remaining_budget_s(started_at_monotonic)
             try:
                 if self.settings.ml.enable_visual_verification:
-                    result = await self.verifier.verify(prediction, evidence_chain)
+                    result = await self.verifier.verify(prediction, evidence_chain, total_timeout=verification_budget)
                     prediction["confidence"] = result.confidence
                     prediction["verified"] = result.verified
                     prediction["claims"] = [
@@ -191,7 +213,7 @@ class ReasoningAgent:
                 else:
                     # Fast-path verification
                     is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
-                        prediction, evidence_chain
+                        prediction, evidence_chain, total_timeout=verification_budget
                     )
                     prediction["confidence"] = adjusted_conf
                     prediction["verified"] = is_plausible
@@ -200,8 +222,9 @@ class ReasoningAgent:
             except Exception as e:
                 logger.warning("Full verification failed, falling back to quick_verify: {}", e)
                 try:
+                    fallback_budget = self._remaining_budget_s(started_at_monotonic)
                     is_plausible, adjusted_conf, reason = await self.verifier.quick_verify(
-                        prediction, evidence_chain
+                        prediction, evidence_chain, total_timeout=fallback_budget
                     )
                     prediction["confidence"] = adjusted_conf
                     prediction["verified"] = is_plausible
@@ -229,6 +252,7 @@ class ReasoningAgent:
         max_candidates: int = 5,
         skip_verification: bool = False,
         hint: str | None = None,
+        started_at_monotonic: float = 0.0,
     ) -> list[dict[str, Any]]:
         """Produce top-N ranked candidate locations.
 
@@ -246,7 +270,7 @@ class ReasoningAgent:
         from src.utils.geo_math import haversine_distance
 
         # Get single prediction as primary
-        primary = await self.reason(evidence_chain, features, skip_verification=skip_verification)
+        primary = await self.reason(evidence_chain, features, skip_verification=skip_verification, started_at_monotonic=started_at_monotonic)
         candidates = [primary]
 
         # Cluster geo evidences
@@ -422,7 +446,10 @@ class ReasoningAgent:
         # Skip primary candidate (index 0) — already has geocoding from LLM reasoning
         tasks = [_geocode_candidate(c) for c in candidates[1:]]
         if tasks:
-            await asyncio.gather(*tasks)
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks), timeout=45.0)
+            except asyncio.TimeoutError:
+                logger.warning("Reverse geocoding timed out after 45s, some candidates may lack address details")
 
     def _cluster_by_proximity(
         self,
@@ -721,12 +748,22 @@ class ReasoningAgent:
         return prediction
 
 
+def _find_json_object(text: str) -> str | None:
+    """Find the last balanced JSON object in text.
+
+    Delegates to the shared utility so preamble JSON fragments
+    (e.g. ``The hint says {"city":"London"} but...``) are skipped.
+    """
+    from src.utils.json_utils import find_json_object
+    return find_json_object(text)
+
+
 def _parse_prediction(raw: str) -> dict[str, Any]:
     """Parse LLM reasoning response."""
     try:
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            data = json.loads(match.group())
+        json_str = _find_json_object(raw)
+        if json_str:
+            data = json.loads(json_str)
             return {
                 "name": data.get("name", "Unknown"),
                 "country": data.get("country"),

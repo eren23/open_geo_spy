@@ -17,6 +17,7 @@ from loguru import logger
 from src.config.llm import LLMCallType, get_llm_params
 from src.evidence.chain import Evidence, EvidenceChain
 from src.scoring.scorer import GeoScorer
+from src.utils.retry import execute_with_retry
 
 
 class VerificationStatus(str, Enum):
@@ -88,24 +89,32 @@ class LocationVerifier:
         self,
         prediction: dict,
         evidence_chain: EvidenceChain,
+        total_timeout: float = 60.0,
     ) -> VerificationResult:
         """Full CoVe verification of a location prediction.
 
         Args:
             prediction: {"name": str, "lat": float, "lon": float, "confidence": float, "reasoning": str}
             evidence_chain: All collected evidence
+            total_timeout: Wall-clock budget for the entire verification (seconds).
         """
         try:
+            import time as _time
+            vstart = _time.monotonic()
+
             # Step 1: Decompose into claims
-            claims = await self._decompose_into_claims(prediction)
+            decompose_timeout = min(30.0, total_timeout * 0.4)
+            claims = await self._decompose_into_claims(prediction, timeout=decompose_timeout)
             if not claims:
                 return VerificationResult(
                     verified=False, confidence=0.0, reason="Could not decompose prediction into verifiable claims"
                 )
 
             # Steps 2-4: Verify claims and detect contradictions
+            elapsed = _time.monotonic() - vstart
+            verify_timeout = min(30.0, max(5.0, total_timeout - elapsed))
             evidence_context = evidence_chain.to_prompt_context()
-            verified_claims = await self._verify_claims(claims, evidence_context)
+            verified_claims = await self._verify_claims(claims, evidence_context, timeout=verify_timeout)
 
             # Skip contradiction detection with too few claims
             if len(verified_claims) < 2:
@@ -126,6 +135,7 @@ class LocationVerifier:
         self,
         prediction: dict,
         evidence_chain: EvidenceChain,
+        total_timeout: float = 30.0,
     ) -> tuple[bool, float, str]:
         """Fast binary verification. Returns (is_plausible, adjusted_confidence, reason)."""
         evidence_context = evidence_chain.to_prompt_context()
@@ -144,11 +154,14 @@ Is this prediction supported by the evidence? Consider:
 3. Are there contradicting evidence points?
 """
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await execute_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=200,
+                max_attempts=2,
+                total_timeout=min(30.0, total_timeout),
             )
             answer = resp.choices[0].message.content.strip()
 
@@ -164,7 +177,7 @@ Is this prediction supported by the evidence? Consider:
             logger.warning("Quick verify failed: {}", str(e))
             return True, prediction.get("confidence", 0.5), f"Verification skipped: {str(e)}"
 
-    async def _decompose_into_claims(self, prediction: dict) -> list[str]:
+    async def _decompose_into_claims(self, prediction: dict, timeout: float = 30.0) -> list[str]:
         """Extract atomic verifiable claims from the prediction."""
         prompt = f"""Decompose this geolocation prediction into atomic, verifiable claims. Each claim should be independently checkable.
 
@@ -179,11 +192,14 @@ List each claim on a separate line, prefixed with "- ". Example:
 - There is a church visible matching Berliner Dom
 """
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await execute_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=500,
+                max_attempts=2,
+                total_timeout=min(30.0, timeout),
             )
             text = resp.choices[0].message.content.strip()
             claims = [line.lstrip("- ").strip() for line in text.split("\n") if line.strip().startswith("-")]
@@ -196,7 +212,7 @@ List each claim on a separate line, prefixed with "- ". Example:
                 claims.append(f"The location is {prediction['name']}")
             return claims
 
-    async def _verify_claims(self, claims: list[str], evidence_context: str) -> list[Claim]:
+    async def _verify_claims(self, claims: list[str], evidence_context: str, timeout: float = 30.0) -> list[Claim]:
         """Verify each claim against the evidence."""
         prompt = f"""For each claim below, determine if it is VERIFIED, CONTRADICTED, UNSUPPORTED, or PARTIALLY_SUPPORTED based ONLY on the evidence provided. For each claim, cite the specific evidence that supports or contradicts it.
 
@@ -214,11 +230,14 @@ CONTRADICTING: [list contradicting evidence or "none"]
 CONFIDENCE: [0.0-1.0]
 """
         try:
-            resp = await self.client.chat.completions.create(
+            resp = await execute_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=1500,
+                max_attempts=2,
+                total_timeout=min(30.0, timeout),
             )
             return self._parse_verification_response(resp.choices[0].message.content, claims)
         except Exception as e:

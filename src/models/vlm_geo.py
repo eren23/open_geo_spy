@@ -17,6 +17,7 @@ from PIL import Image
 
 from src.evidence.chain import Evidence, EvidenceSource
 from src.scoring.scorer import GeoScorer
+from src.utils.retry import execute_with_retry
 
 GEO_REASONING_PROMPT = """You are an expert geolocation analyst. Analyze this image and determine the most likely location.
 
@@ -64,7 +65,8 @@ async def predict_location(
         if additional_context:
             prompt += f"\n\nAdditional context from other analyses:\n{additional_context}"
 
-        resp = await client.chat.completions.create(
+        resp = await execute_with_retry(
+            client.chat.completions.create,
             model=model,
             messages=[
                 {
@@ -77,6 +79,8 @@ async def predict_location(
             ],
             temperature=0.1,
             max_tokens=2000,
+            max_attempts=2,
+            total_timeout=45.0,
         )
 
         raw = resp.choices[0].message.content
@@ -158,13 +162,23 @@ def _encode_image(image_path: str) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
+def _find_json_object(text: str) -> str | None:
+    """Find the last balanced JSON object in text.
+
+    Delegates to the shared utility so preamble JSON fragments
+    (e.g. ``The hint says {"city":"London"} but...``) are skipped.
+    """
+    from src.utils.json_utils import find_json_object
+    return find_json_object(text)
+
+
 def _parse_response(raw: str) -> dict[str, Any]:
     """Parse VLM response, extracting JSON from possible markdown/text."""
     try:
         # Try to find JSON in the response
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            data = json.loads(match.group())
+        json_str = _find_json_object(raw)
+        if json_str:
+            data = json.loads(json_str)
             # Validate and clean
             result = {
                 "country": data.get("country"),

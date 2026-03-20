@@ -172,6 +172,7 @@ async def feature_extraction_node(
             recorder.record_error(str(e), step="feature_extraction")
         writer({"event": "step_error", "step": "feature_extraction", "error": str(e)})
         return {
+            "evidences": [],
             "metadata": {},
             "features": {},
             "ocr_result": {},
@@ -268,6 +269,7 @@ async def ml_ensemble_node(
             recorder.record_error(str(e), step="ml_ensemble")
         writer({"event": "step_error", "step": "ml_ensemble", "error": str(e)})
         return {
+            "evidences": [],
             "errors": [f"ml_ensemble: {e}"],
             "step_results": [{"name": "ml_ensemble", "status": "failed", "error": str(e)}],
         }
@@ -342,6 +344,7 @@ async def web_intelligence_node(
             recorder.record_error(str(e), step="web_intelligence")
         writer({"event": "step_error", "step": "web_intelligence", "error": str(e)})
         return {
+            "evidences": [],
             "errors": [f"web_intelligence: {e}"],
             "step_results": [{"name": "web_intelligence", "status": "failed", "error": str(e)}],
         }
@@ -538,6 +541,7 @@ async def candidate_verification_node(
             recorder.record_error(str(e), step="candidate_verification")
         writer({"event": "step_error", "step": "candidate_verification", "error": str(e)})
         return {
+            "evidences": [],
             "errors": [f"candidate_verification: {e}"],
             "step_results": [{"name": "candidate_verification", "status": "failed", "error": str(e)}],
         }
@@ -576,27 +580,12 @@ async def reasoning_node(
         # Get location hint and optionally filter evidence
         location_hint = state.get("location_hint")
         if location_hint:
-            # Log that we have a hint
             writer({
                 "event": "hint_applied",
                 "hint": location_hint,
             })
-            
-            # Filter evidence to only include matching countries
-            # This prevents wrong-country ML predictions from polluting results
-            from src.geo.country_matcher import extract_country_from_location
-            hint_country = extract_country_from_location(location_hint)
-            if hint_country:
-                logger.info(
-                    "Filtering evidence by hint country: {} -> {}",
-                    location_hint,
-                    hint_country,
-                )
-                # Keep non-geo evidence but filter geo evidence from wrong countries
-                evidence_chain = evidence_chain.filter_by_hint(
-                    hint_country,
-                    keep_non_geo=True,
-                )
+            # Keep all evidence: filtering by hint country removed wrong-country signals
+            # and made the model ignore plates/OCR/visual_match when the hint was off.
 
         # Produce multi-candidate results and use the top one as primary
         quality = (state.get("quality") or "balanced").lower()
@@ -613,15 +602,19 @@ async def reasoning_node(
         if recorder and len(recorder.llm_calls) >= settings.pipeline.max_llm_calls:
             skip_verification = True
 
+        pipeline_started = state.get("started_at_monotonic", 0.0) or 0.0
         ranked = await agent.reason_multi_candidate(
             evidence_chain,
             features,
             skip_verification=skip_verification,
+            hint=location_hint,
+            started_at_monotonic=pipeline_started,
         )
         prediction = ranked[0] if ranked else await agent.reason(
             evidence_chain,
             features,
             skip_verification=skip_verification,
+            started_at_monotonic=pipeline_started,
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 

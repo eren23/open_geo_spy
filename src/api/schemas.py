@@ -13,7 +13,9 @@ from pydantic import BaseModel, Field
 class LocateRequest(BaseModel):
     """Query parameters for locate endpoint (file comes via form data)."""
 
-    location_hint: Optional[str] = Field(None, description="Optional location hint to bias search")
+    location_hint: Optional[str] = Field(
+        None, description="Optional location context (tie-breaker; does not override strong image evidence)"
+    )
 
 
 # --- Responses ---

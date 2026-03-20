@@ -102,16 +102,30 @@ async def execute_with_retry(
     max_attempts: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
+    total_timeout: float = 60.0,
     **kwargs: Any,
 ) -> Any:
     """Execute an async function with retry logic.
 
     Use this for one-off retries where a decorator is inconvenient.
+
+    Args:
+        total_timeout: Maximum wall-clock seconds for all attempts combined (0 = no limit).
     """
     import asyncio
+    import time as _time
 
+    start_time = _time.monotonic()
     last_error = None
     for attempt in range(1, max_attempts + 1):
+        # Check total timeout before each attempt
+        if total_timeout > 0:
+            elapsed = _time.monotonic() - start_time
+            if elapsed >= total_timeout:
+                raise last_error or TimeoutError(
+                    f"execute_with_retry exceeded total_timeout={total_timeout}s"
+                )
+
         try:
             return await func(*args, **kwargs)
         except Exception as e:
@@ -123,6 +137,12 @@ async def execute_with_retry(
 
             if attempt < max_attempts:
                 delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                # Cap delay to remaining budget
+                if total_timeout > 0:
+                    remaining = total_timeout - (_time.monotonic() - start_time)
+                    if remaining <= 0:
+                        break
+                    delay = min(delay, remaining)
                 logger.warning(
                     "Attempt {}/{} failed ({}): {}. Retrying in {:.1f}s",
                     attempt,
@@ -133,4 +153,4 @@ async def execute_with_retry(
                 )
                 await asyncio.sleep(delay)
 
-    raise last_error
+    raise last_error or RuntimeError("execute_with_retry: no attempts made")
