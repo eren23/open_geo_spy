@@ -210,29 +210,21 @@ class TestScoringConfigHintValues:
     """Tests for scoring config values related to hints."""
     
     def test_hint_vote_multiplier(self):
-        """Hint vote multiplier should be high."""
+        """Hint vote multiplier should nudge consensus without drowning models/OCR."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # Should be >= 5 for strong hint authority
-        assert config.country_penalty.hint_vote_multiplier >= 5
+        assert 2 <= config.country_penalty.hint_vote_multiplier <= 5
     
     def test_hint_boost_values(self):
-        """Hint boost values should be significant."""
+        """Hint boosts favor alignment without dominating other signals."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # Match boost should be > 1.0
         assert config.hint.match_boost > 1.0
-        # Strong match boost should be even higher
         assert config.hint.strong_match_boost > config.hint.match_boost
-        # No-match penalty should be significant
-        assert config.hint.no_match_penalty < 0.3
+        assert 0.5 <= config.hint.no_match_penalty <= 0.85
     
     def test_strong_hint_penalty(self):
-        """Strong hint penalty should be heavy."""
+        """Non-hint candidates are downranked but not erased."""
         from src.scoring.config import ScoringConfig
         config = ScoringConfig()
-        
-        # Should be low to heavily penalize wrong-country candidates
-        assert config.country_penalty.strong_hint_penalty < 0.2
+        assert 0.4 <= config.country_penalty.strong_hint_penalty <= 0.8

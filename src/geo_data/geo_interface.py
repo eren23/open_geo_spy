@@ -259,8 +259,8 @@ class GeoDataInterface:
                     # Smaller boost for matches within the region
                     candidate["confidence"] = min(1.0, candidate["confidence"] + 0.1)
                 else:
-                    # Stronger penalty for matches outside the region
-                    candidate["confidence"] *= 0.3
+                    # Downrank out-of-hint-region candidates; keep some weight for strong clues elsewhere
+                    candidate["confidence"] *= 0.55
 
         # Deduplicate and rank candidates
         ranked_candidates = self._rank_candidates(all_candidates, processed_features, initial_coords)

@@ -54,9 +54,9 @@ Return a JSON object with these fields:
 
 FEATURE_EXTRACTION_PROMPT_WITH_HINT = """Analyze this image for geolocation clues.
 
-IMPORTANT CONTEXT: The user indicates this image is from: {location_hint}
+CONTEXT: The user suggests this image may be from: {location_hint}
 
-This is a STRONG prior - focus your analysis on features consistent with this location, but still identify any contradictory evidence.
+Treat this as optional guidance: look for features that confirm OR contradict it. Contradictions are as important as confirmations.
 
 Extract ALL visual features that could help identify the location. Return a JSON object with these fields:
 {
@@ -275,7 +275,7 @@ def _parse_features(raw: str) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
 
-        logger.error("Failed to parse features from VLM response")
+        logger.warning("Failed to parse features from VLM response (first 500 chars): {}", raw[:500])
         return _empty_features()
 
 

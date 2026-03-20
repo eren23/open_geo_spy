@@ -44,5 +44,6 @@ env/
 .attocode/traces
 .attocode/sessions
 .attocode/cache
+.attocode/vectors
 
 .cursor/

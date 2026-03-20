@@ -78,7 +78,7 @@ class CandidateRankingWeights(BaseModel):
     source_diversity: float = 0.05  # Reduced: cities naturally have more sources
     visual_match: float = 0.15
     country_match: float = 0.30
-    country_match_with_hint: float = 0.45  # Even higher when user hint present
+    country_match_with_hint: float = 0.30  # Same as country_match; hint influence via boost/penalty, not extra ranking weight
     evidence_count_cap: int = 5
     evidence_count_normalizer: float = 3.0  # Cap benefit earlier: 3 vs 10 evidence matters less
     source_diversity_normalizer: float = 5.0
@@ -88,18 +88,18 @@ class CountryPenalty(BaseModel):
     """Parameters for penalizing wrong-country candidates."""
 
     consensus_threshold: float = 0.6  # Only apply penalty when dominance > 60% (P2.3)
-    consensus_threshold_with_hint: float = 0.4  # Lower threshold when user hint is present
+    consensus_threshold_with_hint: float = 0.52  # Hints skew votes slightly; keep bar near default
     penalty_factor: float = 0.7
-    hint_vote_multiplier: int = 10  # Increased from 3 - user hints are very valuable
-    strong_hint_penalty: float = 0.1  # Heavy penalty for non-matching candidates when hint present
+    hint_vote_multiplier: int = 3  # Few synthetic votes; strong clues should still win
+    strong_hint_penalty: float = 0.65  # Penalize non-hint matches without erasing alternates
 
 
 class HintAdjustment(BaseModel):
     """Confidence adjustments for location hint matching."""
 
-    match_boost: float = 1.8  # Increased from 1.5
-    no_match_penalty: float = 0.15  # More aggressive penalty (was 0.5)
-    strong_match_boost: float = 2.0  # For exact city/region match with hint
+    match_boost: float = 1.10
+    no_match_penalty: float = 0.75
+    strong_match_boost: float = 1.20  # Reward hint alignment without dominating ranking
 
 
 class VerificationAdjustment(BaseModel):
