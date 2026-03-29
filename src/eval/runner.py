@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from loguru import logger
 
@@ -22,11 +22,13 @@ class EvalRunner:
         label: str = "",
         max_concurrent: int = 3,
         output_dir: str = "data/eval/results",
+        quality: str = "balanced",
     ):
         self.label = label
         self.max_concurrent = max_concurrent
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.quality = quality
 
     async def run(
         self,
@@ -78,10 +80,18 @@ class EvalRunner:
 
         settings = get_settings()
         orchestrator = Orchestrator(settings)
+        timeout_s = None
+        if settings.pipeline.max_total_latency_ms > 0:
+            timeout_s = settings.pipeline.max_total_latency_ms / 1000.0 + 15.0
 
         start = time.monotonic()
         try:
-            result = await orchestrator.locate(sample.image_path)
+            locate_coro = orchestrator.locate(
+                sample.image_path,
+                quality=self.quality,
+                ground_truth=sample.to_dict(),
+            )
+            result = await asyncio.wait_for(locate_coro, timeout=timeout_s) if timeout_s else await locate_coro
             duration_ms = round((time.monotonic() - start) * 1000, 1)
 
             prediction = result.get("prediction", result)
@@ -92,6 +102,25 @@ class EvalRunner:
                 pred_country=prediction.get("country", ""),
                 pred_city=prediction.get("city", ""),
                 pred_confidence=prediction.get("confidence", 0.0),
+                gt_lat=sample.latitude,
+                gt_lon=sample.longitude,
+                gt_country=sample.country,
+                gt_city=sample.city,
+                difficulty=sample.difficulty,
+                urban_rural=sample.urban_rural,
+                tags=sample.tags,
+                latency_ms=duration_ms,
+                session_id=result.get("session_id", ""),
+                trace_path=result.get("trace_path", ""),
+                candidate_count=len(result.get("candidates", [])),
+                reasoning=prediction.get("reasoning", ""),
+                prediction=prediction,
+            )
+        except TimeoutError:
+            duration_ms = round((time.monotonic() - start) * 1000, 1)
+            logger.error("Pipeline timed out for {} after {:.1f}ms", sample.image_path, duration_ms)
+            return SampleResult(
+                image_path=sample.image_path,
                 gt_lat=sample.latitude,
                 gt_lon=sample.longitude,
                 gt_country=sample.country,
@@ -113,3 +142,55 @@ class EvalRunner:
                 urban_rural=sample.urban_rural,
                 tags=sample.tags,
             )
+
+    def save_artifacts(
+        self,
+        dataset: EvalDataset,
+        metrics: EvalMetrics,
+        output_dir: str | Path,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """Persist per-sample and aggregate artifacts for a dataset run."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        sample_results_path = output_dir / "sample_results.jsonl"
+        with open(sample_results_path, "w") as f:
+            for result in metrics.results:
+                f.write(json.dumps(result.to_dict(), default=str) + "\n")
+
+        metrics_path = output_dir / "metrics.json"
+        with open(metrics_path, "w") as f:
+            json.dump(
+                {
+                    "label": self.label,
+                    "dataset": dataset.name,
+                    "dataset_description": dataset.description,
+                    "dataset_version": dataset.version,
+                    "quality": self.quality,
+                    "metrics": metrics.summary(),
+                    "metadata": metadata or {},
+                },
+                f,
+                indent=2,
+            )
+
+        manifest_path = output_dir / "dataset_manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(
+                {
+                    "dataset": dataset.name,
+                    "count": len(dataset.samples),
+                    "sample_results_path": str(sample_results_path),
+                    "metrics_path": str(metrics_path),
+                    "metadata": metadata or {},
+                },
+                f,
+                indent=2,
+            )
+
+        return {
+            "sample_results_path": str(sample_results_path),
+            "metrics_path": str(metrics_path),
+            "manifest_path": str(manifest_path),
+        }

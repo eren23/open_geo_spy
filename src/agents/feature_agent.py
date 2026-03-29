@@ -31,8 +31,6 @@ class FeatureExtractionAgent:
             api_key=settings.llm.api_key,
         )
         self.metadata_extractor = MetadataExtractor()
-        self.fast_model = settings.llm.fast_model
-
     async def extract(
         self,
         image_path: str,
@@ -64,9 +62,9 @@ class FeatureExtractionAgent:
         tasks = [
             asyncio.ensure_future(asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)),
             asyncio.ensure_future(visual_features.extract_visual_features(
-                image_path, self.client, self.fast_model, location_hint=location_hint
+                image_path, self.client, self.settings, location_hint=location_hint
             )),
-            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.fast_model)),
+            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.settings)),
         ]
 
         done, pending = await asyncio.wait(tasks, timeout=45.0)
@@ -149,9 +147,9 @@ class FeatureExtractionAgent:
         tasks = [
             asyncio.ensure_future(asyncio.to_thread(self.metadata_extractor.extract_metadata, image_path)),
             asyncio.ensure_future(visual_features.extract_visual_features(
-                image_path, self.client, self.fast_model, location_hint=location_hint
+                image_path, self.client, self.settings, location_hint=location_hint
             )),
-            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.fast_model)),
+            asyncio.ensure_future(ocr.extract_text(image_path, self.client, self.settings)),
         ]
 
         done, pending = await asyncio.wait(tasks, timeout=45.0)

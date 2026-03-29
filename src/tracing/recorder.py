@@ -29,6 +29,7 @@ class TraceRecorder:
         output_dir: str = "data/traces",
         version: str = "",
         settings_snapshot: dict | None = None,
+        image_path: str = "",
         image_hash: str = "",
     ):
         self.session_id = session_id
@@ -47,6 +48,7 @@ class TraceRecorder:
         # Write header
         header = TraceHeader(
             session_id=session_id,
+            image_path=image_path,
             image_hash=image_hash,
             version=version,
             settings_snapshot=settings_snapshot or {},
@@ -99,6 +101,97 @@ class TraceRecorder:
                 "content_preview": content_preview[:200],
                 "confidence": confidence,
             },
+        ).to_dict())
+
+    def record_search_query(
+        self,
+        query: str,
+        provider: str = "",
+        intent: str = "",
+        status: str = "",
+        duration_ms: float = 0.0,
+        evidence_count: int = 0,
+        retry_count: int = 0,
+        cost_effectiveness: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a search query node outcome."""
+        payload: dict[str, Any] = {
+            "query": query,
+            "provider": provider,
+            "intent": intent,
+            "status": status,
+            "duration_ms": duration_ms,
+            "evidence_count": evidence_count,
+            "retry_count": retry_count,
+            "cost_effectiveness": cost_effectiveness,
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        self._write_event(TraceEvent(
+            event_type=TraceEventType.SEARCH_QUERY,
+            data=payload,
+        ).to_dict())
+
+    def record_candidate_snapshot(
+        self,
+        stage: str,
+        candidates: list[dict[str, Any]],
+        selected_index: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a ranked candidate snapshot for later trace analysis."""
+        normalized = []
+        for candidate in candidates[:5]:
+            normalized.append({
+                "name": candidate.get("name"),
+                "country": candidate.get("country"),
+                "city": candidate.get("city"),
+                "lat": candidate.get("lat", candidate.get("latitude")),
+                "lon": candidate.get("lon", candidate.get("longitude")),
+                "confidence": candidate.get("confidence", 0.0),
+                "rank": candidate.get("rank"),
+            })
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "selected_index": selected_index,
+            "candidates": normalized,
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        self._write_event(TraceEvent(
+            event_type=TraceEventType.CANDIDATE_SNAPSHOT,
+            data=payload,
+        ).to_dict())
+
+    def record_final_selection(
+        self,
+        prediction: dict[str, Any],
+        selected_index: int = 0,
+        candidate_count: int = 0,
+    ) -> None:
+        """Record the final selected prediction."""
+        self._write_event(TraceEvent(
+            event_type=TraceEventType.FINAL_SELECTION,
+            data={
+                "selected_index": selected_index,
+                "candidate_count": candidate_count,
+                "prediction": {
+                    "name": prediction.get("name"),
+                    "country": prediction.get("country"),
+                    "city": prediction.get("city"),
+                    "lat": prediction.get("lat", prediction.get("latitude")),
+                    "lon": prediction.get("lon", prediction.get("longitude")),
+                    "confidence": prediction.get("confidence", 0.0),
+                },
+            },
+        ).to_dict())
+
+    def record_anomaly(self, flag: str, details: dict[str, Any] | None = None) -> None:
+        """Record an anomaly flag."""
+        self._write_event(TraceEvent(
+            event_type=TraceEventType.ANOMALY_FLAG,
+            data={"flag": flag, "details": details or {}},
         ).to_dict())
 
     def record_grounding(self, level: str, verdict: str, confidence: float, explanation: str = "") -> None:
