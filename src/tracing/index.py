@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS traces (
     session_id TEXT PRIMARY KEY,
     timestamp TEXT NOT NULL,
     version TEXT,
+    image_path TEXT,
     image_hash TEXT,
     prediction_country TEXT,
     prediction_city TEXT,
@@ -48,6 +49,17 @@ class TraceIndex:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Apply lightweight schema migrations for older trace indexes."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(traces)").fetchall()
+        }
+        if "image_path" not in existing:
+            self._conn.execute("ALTER TABLE traces ADD COLUMN image_path TEXT")
+            self._conn.commit()
 
     def index_trace(self, trace_path: str | Path, *, _commit: bool = True) -> None:
         """Index a single JSONL trace file."""
@@ -94,16 +106,17 @@ class TraceIndex:
 
         self._conn.execute(
             """INSERT OR REPLACE INTO traces
-               (session_id, timestamp, version, image_hash,
+               (session_id, timestamp, version, image_path, image_hash,
                 prediction_country, prediction_city, prediction_lat, prediction_lon,
                 confidence, total_cost_usd, total_tokens, total_duration_ms,
                 ground_truth_lat, ground_truth_lon, ground_truth_country,
                 gcd_error_km, country_correct, trace_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 header.get("timestamp", ""),
                 header.get("version", ""),
+                header.get("image_path", ""),
                 header.get("image_hash", ""),
                 prediction.get("country"),
                 prediction.get("city"),

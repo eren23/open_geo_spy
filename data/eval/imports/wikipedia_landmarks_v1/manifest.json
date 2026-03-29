@@ -1,0 +1,167 @@
+{
+  "name": "wikipedia_landmarks_v1",
+  "description": "Curated real-image landmark seed set fetched from Wikipedia/Wikimedia.",
+  "version": "1.0",
+  "samples": [
+    {
+      "image_path": "images/eiffel_tower.jpg",
+      "latitude": 48.8584,
+      "longitude": 2.2945,
+      "country": "France",
+      "city": "Paris",
+      "region": "Ile-de-France",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "europe"
+      ],
+      "metadata": {
+        "page_title": "Eiffel Tower",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/85/Tour_Eiffel_Wikimedia_Commons_%28cropped%29.jpg/330px-Tour_Eiffel_Wikimedia_Commons_%28cropped%29.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/statue_of_liberty.jpg",
+      "latitude": 40.6892,
+      "longitude": -74.0445,
+      "country": "United States",
+      "city": "New York",
+      "region": "New York",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "north_america"
+      ],
+      "metadata": {
+        "page_title": "Statue of Liberty",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Front_view_of_Statue_of_Liberty_%28cropped%29.jpg/330px-Front_view_of_Statue_of_Liberty_%28cropped%29.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Statue_of_Liberty",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/taj_mahal.jpg",
+      "latitude": 27.1751,
+      "longitude": 78.0421,
+      "country": "India",
+      "city": "Agra",
+      "region": "Uttar Pradesh",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "asia"
+      ],
+      "metadata": {
+        "page_title": "Taj Mahal",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1d/Taj_Mahal_%28Edited%29.jpeg/330px-Taj_Mahal_%28Edited%29.jpeg",
+        "page_url": "https://en.wikipedia.org/wiki/Taj_Mahal",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/colosseum.jpg",
+      "latitude": 41.8902,
+      "longitude": 12.4922,
+      "country": "Italy",
+      "city": "Rome",
+      "region": "Lazio",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "europe"
+      ],
+      "metadata": {
+        "page_title": "Colosseum",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/Colosseo_2020.jpg/330px-Colosseo_2020.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Colosseum",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/sydney_opera_house.jpg",
+      "latitude": -33.8568,
+      "longitude": 151.2153,
+      "country": "Australia",
+      "city": "Sydney",
+      "region": "New South Wales",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "oceania"
+      ],
+      "metadata": {
+        "page_title": "Sydney Opera House",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a0/Sydney_Australia._%2821339175489%29.jpg/330px-Sydney_Australia._%2821339175489%29.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Sydney_Opera_House",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/christ_the_redeemer.jpg",
+      "latitude": -22.9519,
+      "longitude": -43.2105,
+      "country": "Brazil",
+      "city": "Rio de Janeiro",
+      "region": "Rio de Janeiro",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "south_america"
+      ],
+      "metadata": {
+        "page_title": "Christ the Redeemer (statue)",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4f/Christ_the_Redeemer_-_Cristo_Redentor.jpg/330px-Christ_the_Redeemer_-_Cristo_Redentor.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Christ_the_Redeemer_(statue)",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/great_pyramid_of_giza.jpg",
+      "latitude": 29.9792,
+      "longitude": 31.1342,
+      "country": "Egypt",
+      "city": "Giza",
+      "region": "Giza",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "africa"
+      ],
+      "metadata": {
+        "page_title": "Great Pyramid of Giza",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/Great_Pyramid_of_Giza_-_Pyramid_of_Khufu.jpg/330px-Great_Pyramid_of_Giza_-_Pyramid_of_Khufu.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Great_Pyramid_of_Giza",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    },
+    {
+      "image_path": "images/big_ben.jpg",
+      "latitude": 51.5007,
+      "longitude": -0.1246,
+      "country": "United Kingdom",
+      "city": "London",
+      "region": "England",
+      "difficulty": "easy",
+      "urban_rural": "",
+      "tags": [
+        "landmark",
+        "europe"
+      ],
+      "metadata": {
+        "page_title": "Big Ben",
+        "source_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/43/Elizabeth_Tower%2C_June_2022.jpg/330px-Elizabeth_Tower%2C_June_2022.jpg",
+        "page_url": "https://en.wikipedia.org/wiki/Big_Ben",
+        "source_label": "WikipediaLandmarksV1"
+      }
+    }
+  ]
+}

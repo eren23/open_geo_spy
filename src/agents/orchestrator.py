@@ -105,6 +105,7 @@ class GeoLocatorOrchestrator:
         recorder = TraceRecorder(
             session_id=sid,
             version=self.settings.version if hasattr(self.settings, "version") else "0.3.0",
+            image_path=image_path,
             image_hash=image_hash,
         )
 
@@ -153,6 +154,7 @@ class GeoLocatorOrchestrator:
         image_path: str,
         location_hint: str | None = None,
         quality: str = "balanced",
+        ground_truth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run the full geolocation pipeline (blocking).
 
@@ -185,6 +187,9 @@ class GeoLocatorOrchestrator:
 
             result = {
                 **prediction,
+                "prediction": prediction,
+                "candidates": final_state.get("ranked_candidates", []),
+                "session_id": state.get("session_id"),
                 "pipeline_progress": progress.to_dict(),
                 "total_evidence_count": progress.total_evidence,
                 "elapsed_ms": round(elapsed, 1),
@@ -197,11 +202,18 @@ class GeoLocatorOrchestrator:
             recorder = final_state.get("trace_recorder")
             if recorder:
                 try:
+                    recorder.record_final_selection(
+                        prediction=prediction,
+                        selected_index=0,
+                        candidate_count=len(final_state.get("ranked_candidates", [])),
+                    )
                     trace_path = recorder.finalize(
                         prediction=prediction,
                         candidates=final_state.get("ranked_candidates", []),
                         total_duration_ms=elapsed,
+                        ground_truth=ground_truth,
                     )
+                    result["trace_path"] = str(trace_path)
                     index = TraceIndex()
                     try:
                         index.index_trace(trace_path)

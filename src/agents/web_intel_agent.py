@@ -90,6 +90,7 @@ class WebIntelAgent:
         ocr_result: dict[str, list[str]] | None = None,
         weak_areas: list[str] | None = None,
         started_at_monotonic: float = 0.0,
+        recorder: Any = None,
     ) -> tuple[EvidenceChain, SearchGraph]:
         """Run tiered search based on available evidence.
 
@@ -133,7 +134,7 @@ class WebIntelAgent:
             graph.add_node(query, intent=QueryIntent.INITIAL)
 
         # --- Tier 1: Execute pending graph nodes (parallel) ---
-        await self._execute_pending_nodes(graph, chain, country_hint=country_hint)
+        await self._execute_pending_nodes(graph, chain, country_hint=country_hint, recorder=recorder)
 
         # OSM search if we have coordinates from evidence
         cluster = evidence_chain.location_cluster()
@@ -179,7 +180,7 @@ class WebIntelAgent:
                 # Execute the newly added pending nodes
                 if suggestions:
                     logger.info("Smart expander added {} queries, executing...", len(suggestions))
-                    await self._execute_pending_nodes(graph, chain, country_hint=country_hint)
+                    await self._execute_pending_nodes(graph, chain, country_hint=country_hint, recorder=recorder)
             except Exception as e:
                 logger.warning("Smart expansion failed: {}", e)
 
@@ -214,6 +215,7 @@ class WebIntelAgent:
         graph: SearchGraph, 
         chain: EvidenceChain,
         country_hint: str | None = None,
+        recorder: Any = None,
     ) -> None:
         """Execute all pending search nodes in the graph in parallel.
         
@@ -247,6 +249,18 @@ class WebIntelAgent:
                 # P1.8: Record failed pattern if no evidence
                 if node.evidence_count == 0:
                     graph.record_failed_pattern(node.query)
+                if recorder:
+                    recorder.record_search_query(
+                        query=node.query,
+                        provider=node.provider,
+                        intent=node.intent.value,
+                        status=node.status.value,
+                        duration_ms=node.duration_ms,
+                        evidence_count=node.evidence_count,
+                        retry_count=node.retry_count,
+                        cost_effectiveness=node.cost_effectiveness,
+                        metadata={"country_hint": country_hint or ""},
+                    )
                 return evidences
             except Exception as e:
                 node.status = SearchNodeStatus.FAILED
@@ -254,6 +268,18 @@ class WebIntelAgent:
                 node.duration_ms = round((_time.monotonic() - start) * 1000, 1)
                 node.retry_count += 1  # P1.7: Increment retry count
                 graph.record_failed_pattern(node.query)  # P1.8: Record failure
+                if recorder:
+                    recorder.record_search_query(
+                        query=node.query,
+                        provider=node.provider,
+                        intent=node.intent.value,
+                        status=node.status.value,
+                        duration_ms=node.duration_ms,
+                        evidence_count=0,
+                        retry_count=node.retry_count,
+                        cost_effectiveness=0.0,
+                        metadata={"error": node.error, "country_hint": country_hint or ""},
+                    )
                 return []
 
         results = await asyncio.gather(*[_run_node(n) for n in pending], return_exceptions=True)

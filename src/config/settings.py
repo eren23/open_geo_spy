@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -146,6 +147,25 @@ class EvolutionSettings(BaseModel):
     auto_apply: bool = False  # If True, load tuned weights at startup
 
 
+class ImprovementSettings(BaseModel):
+    """Self-improving experiment loop configuration."""
+
+    enabled: bool = False
+    output_dir: str = "data/improve"
+    worktree_dir: str = "data/improve/worktrees"
+    candidate_count: int = 3
+    candidate_file_limit: int = 6
+    mutator_model: str = "google/gemini-2.5-pro"
+    judge_model: str = "google/gemini-2.5-flash"
+    hard_regression_accuracy_25km: float = 0.01
+    hard_regression_country_accuracy: float = 0.01
+    hard_regression_median_gcd_km: float = 25.0
+    soft_latency_penalty: float = 0.0005
+    soft_cost_penalty: float = 10.0
+    protected_tags: list[str] = ["regression", "found_then_lost"]
+    auto_cleanup_worktrees: bool = False
+
+
 class PipelineSettings(BaseModel):
     """Pipeline execution policy and latency/cost budgets."""
 
@@ -195,6 +215,7 @@ class Settings(BaseSettings):
     calibration: CalibrationSettings = CalibrationSettings()
     tracing: TracingSettings = TracingSettings()
     evolution: EvolutionSettings = EvolutionSettings()
+    improvement: ImprovementSettings = ImprovementSettings()
     pipeline: PipelineSettings = PipelineSettings()
 
     model_config = {
@@ -208,8 +229,14 @@ class Settings(BaseSettings):
     @field_validator("image_dir")
     @classmethod
     def ensure_image_dir(cls, v: str) -> str:
-        os.makedirs(v, exist_ok=True)
-        return v
+        path = Path(v).expanduser()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+        except OSError:
+            fallback = Path.cwd() / "images"
+            fallback.mkdir(parents=True, exist_ok=True)
+            return str(fallback)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

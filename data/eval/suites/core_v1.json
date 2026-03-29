@@ -1,0 +1,71 @@
+{
+  "name": "core_v1",
+  "description": "Runnable core benchmark suite. A real landmark seed set is required; public GeoVistaBench, OSV5M, and trace regressions become active once imported.",
+  "protected_tags": [
+    "regression",
+    "found_then_lost"
+  ],
+  "metadata": {
+    "version": 1,
+    "seed": 42,
+    "notes": "Public subsets target 25 samples each when imported."
+  },
+  "datasets": [
+    {
+      "dataset_id": "wikipedia_landmarks_v1",
+      "manifest_path": "../imports/wikipedia_landmarks_v1/manifest.json",
+      "weight": 1.0,
+      "protected": true,
+      "optional": false,
+      "expected_sample_count": 8,
+      "source_label": "WikipediaLandmarksV1",
+      "tags": [
+        "real_image",
+        "landmark"
+      ],
+      "notes": "Real landmark seed set fetched from Wikipedia/Wikimedia for baseline benchmark quality."
+    },
+    {
+      "dataset_id": "geovistabench_subset",
+      "manifest_path": "../imports/geovistabench_subset/manifest.json",
+      "weight": 2.0,
+      "protected": true,
+      "optional": true,
+      "expected_sample_count": 25,
+      "source_label": "GeoVistaBench",
+      "tags": [
+        "public_benchmark",
+        "geovistabench"
+      ],
+      "notes": "Import target for the first 25-sample public benchmark slice."
+    },
+    {
+      "dataset_id": "osv5m_subset",
+      "manifest_path": "../imports/osv5m_subset/manifest.json",
+      "weight": 1.5,
+      "protected": false,
+      "optional": true,
+      "expected_sample_count": 25,
+      "source_label": "OSV5M",
+      "tags": [
+        "public_benchmark",
+        "osv5m"
+      ],
+      "notes": "Import target for the first 25-sample broad street-view slice."
+    },
+    {
+      "dataset_id": "trace_regressions",
+      "manifest_path": "../regressions/trace_regressions.json",
+      "weight": 2.0,
+      "protected": true,
+      "optional": true,
+      "expected_sample_count": null,
+      "source_label": "trace_regressions",
+      "tags": [
+        "regression",
+        "trace_mined"
+      ],
+      "notes": "Future regression cases mined from saved traces."
+    }
+  ]
+}

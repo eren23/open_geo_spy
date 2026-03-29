@@ -10,6 +10,16 @@ data/eval/results/*
 !data/eval/results/.gitkeep
 !data/eval/sample/
 !data/eval/sample/**
+!data/eval/suites/
+!data/eval/suites/**
+!data/eval/imports/
+data/eval/imports/*
+!data/eval/imports/**
+!data/eval/imports/.gitkeep
+!data/eval/regressions/
+data/eval/regressions/*
+!data/eval/regressions/**
+!data/eval/regressions/.gitkeep
 !data/evolution/
 data/evolution/*
 !data/evolution/history/
@@ -41,6 +51,7 @@ env/
 .playwright-mcp
 
 .codex
+.attocode/
 .attocode/traces
 .attocode/sessions
 .attocode/cache

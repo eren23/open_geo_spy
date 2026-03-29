@@ -76,6 +76,8 @@ def _should_skip_candidate_verification(
     settings: Settings,
 ) -> tuple[bool, str | None]:
     """Policy gate for expensive visual candidate verification."""
+    if not settings.ml.enable_visual_verification:
+        return True, "visual_verification_disabled"
     quality = (state.get("quality") or "balanced").lower()
     if quality == "fast":
         return True, "quality=fast"
@@ -313,6 +315,7 @@ async def web_intelligence_node(
             ocr_result,
             weak_areas=state.get("weak_evidence_areas"),
             started_at_monotonic=state.get("started_at_monotonic", 0.0) or 0.0,
+            recorder=recorder,
         )
         duration = round((time.monotonic() - start) * 1000, 1)
 
@@ -610,6 +613,13 @@ async def reasoning_node(
             hint=location_hint,
             started_at_monotonic=pipeline_started,
         )
+        if recorder and ranked:
+            recorder.record_candidate_snapshot(
+                stage="post_reasoning",
+                candidates=ranked,
+                selected_index=0,
+                metadata={"skip_verification": skip_verification},
+            )
         prediction = ranked[0] if ranked else await agent.reason(
             evidence_chain,
             features,

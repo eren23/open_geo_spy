@@ -14,6 +14,10 @@ class TraceEventType(str, Enum):
     STEP_COMPLETE = "step_complete"
     LLM_CALL = "llm_call"
     EVIDENCE_ADDED = "evidence_added"
+    SEARCH_QUERY = "search_query"
+    CANDIDATE_SNAPSHOT = "candidate_snapshot"
+    FINAL_SELECTION = "final_selection"
+    ANOMALY_FLAG = "anomaly_flag"
     COST_UPDATE = "cost_update"
     GROUNDING_RESULT = "grounding_result"
     ERROR = "error"
@@ -25,6 +29,7 @@ class TraceHeader:
     """First line of a trace JSONL file."""
 
     session_id: str
+    image_path: str = ""
     image_hash: str = ""
     version: str = ""
     settings_snapshot: dict = field(default_factory=dict)
@@ -34,6 +39,7 @@ class TraceHeader:
         return {
             "type": TraceEventType.HEADER.value,
             "session_id": self.session_id,
+            "image_path": self.image_path,
             "image_hash": self.image_hash,
             "version": self.version,
             "settings_snapshot": self.settings_snapshot,

@@ -36,6 +36,13 @@ class SampleResult:
     cost_usd: float = 0.0
     latency_ms: float = 0.0
     tokens: int = 0
+    session_id: str = ""
+    trace_path: str = ""
+    candidate_count: int = 0
+    reasoning: str = ""
+    prediction: dict[str, Any] = field(default_factory=dict)
+    trace_anomalies: list[str] = field(default_factory=list)
+    benchmark_source: str = ""
 
     @property
     def gcd_km(self) -> float | None:
@@ -51,6 +58,37 @@ class SampleResult:
     @property
     def city_correct(self) -> bool:
         return self.pred_city.lower() == self.gt_city.lower() if self.pred_city and self.gt_city else False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the sample result for artifact persistence."""
+        return {
+            "image_path": self.image_path,
+            "pred_lat": self.pred_lat,
+            "pred_lon": self.pred_lon,
+            "pred_country": self.pred_country,
+            "pred_city": self.pred_city,
+            "pred_confidence": self.pred_confidence,
+            "gt_lat": self.gt_lat,
+            "gt_lon": self.gt_lon,
+            "gt_country": self.gt_country,
+            "gt_city": self.gt_city,
+            "difficulty": self.difficulty,
+            "urban_rural": self.urban_rural,
+            "tags": self.tags,
+            "cost_usd": self.cost_usd,
+            "latency_ms": self.latency_ms,
+            "tokens": self.tokens,
+            "session_id": self.session_id,
+            "trace_path": self.trace_path,
+            "candidate_count": self.candidate_count,
+            "reasoning": self.reasoning,
+            "prediction": self.prediction,
+            "trace_anomalies": self.trace_anomalies,
+            "benchmark_source": self.benchmark_source,
+            "gcd_km": self.gcd_km,
+            "country_correct": self.country_correct,
+            "city_correct": self.city_correct,
+        }
 
 
 @dataclass
