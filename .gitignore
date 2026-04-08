@@ -58,3 +58,6 @@ env/
 .attocode/vectors
 
 .cursor/
+
+# GEPA optimizer backups
+*.gepa-bak

@@ -1,0 +1,26 @@
+# Stage 4: evolve EXPANSION_PROMPT
+targets:
+  - type: slice
+    path: src/search/smart_expander.py
+    name: expansion_prompt
+    locator:
+      type: python_assignment
+      name: EXPANSION_PROMPT
+
+trace_sources:
+  - type: none
+
+task_sources:
+  - type: inline
+    tasks:
+      - description: "Improve smart search expansion for street-level location verification"
+        files:
+          - src/search/smart_expander.py
+
+evaluator:
+  type: command
+  command: "./.venv/bin/python scripts/gepa_eval_command.py --candidate {candidate} --target expansion"
+  timeout_s: 600
+  fail_score: 0.0
+
+reflection_model: "openrouter/z-ai/glm-5.1"

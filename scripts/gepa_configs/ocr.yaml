@@ -1,0 +1,26 @@
+# Stage 3: evolve OCR_PROMPT
+targets:
+  - type: slice
+    path: src/extraction/ocr.py
+    name: ocr_prompt
+    locator:
+      type: python_assignment
+      name: OCR_PROMPT
+
+trace_sources:
+  - type: none
+
+task_sources:
+  - type: inline
+    tasks:
+      - description: "Improve OCR text extraction to catch street signs, plates, and building info for address finding"
+        files:
+          - src/extraction/ocr.py
+
+evaluator:
+  type: command
+  command: "./.venv/bin/python scripts/gepa_eval_command.py --candidate {candidate} --target ocr"
+  timeout_s: 600
+  fail_score: 0.0
+
+reflection_model: "openrouter/z-ai/glm-5.1"

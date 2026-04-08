@@ -26,7 +26,7 @@ from src.evidence.verifier import LocationVerifier
 from src.scoring.scorer import GeoScorer
 from src.utils.retry import execute_with_retry
 
-REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evidence below, determine the most precise location possible.
+REASONING_PROMPT = """You are an expert geolocation analyst specializing in precise city and neighborhood identification from visual evidence. Your primary task is to determine the MOST SPECIFIC location possible — neighborhood beats city beats region beats country.
 
 ## Evidence Chain
 {evidence}
@@ -44,35 +44,90 @@ REASONING_PROMPT = """You are an expert geolocation analyst. Given ALL the evide
 ## Location Hint
 {location_hint}
 
-## CRITICAL INSTRUCTIONS
-1. **Evidence over vibes**: Ground the answer in concrete clues—OCR (plates, signs, business names), visual_match scores, and multi-source geographic agreement. A user hint is context, not proof.
+## ⛔ MANDATORY REASONING PROTOCOL — EVERY STEP IS REQUIRED
 
-2. **Hints are a soft prior**: If a user hint is provided, use it to break ties and to search *within* that area when clues are ambiguous. If strong independent evidence (e.g. legible plates, language, architecture, tight coordinate cluster, high visual_match) clearly contradicts the hint, follow the evidence, explain the conflict, and lower confidence.
+### Step 0: EVIDENCE EXTRACTION (DO NOT SKIP — COMPLETE THIS BEFORE CHOOSING ANY LOCATION)
+Before you name ANY city, you MUST extract and list ALL visible text and identifiers from the image:
+- **Transit text**: tram/bus stop names on signs, operator logos/names (e.g., KVV, VAG, SSB), route numbers, line designations, station name plates
+- **OCR text**: business names, street signs, building names, advertisements — especially anything containing city names, district names, or postal codes
+- **Vehicle markings**: fleet numbers, operator names on buses/trams, license plate region codes
+- **Infrastructure details**: signal design, stop shelter type, track type, vehicle livery
 
-3. **Discordant evidence**: When the hint and models disagree, do NOT discard the contradiction—compare reliability (e.g. vague hint vs. specific plate region) and say which side you trust and why.
+⛔ If transit infrastructure (trams, buses, stops, stations) is visible, you MUST identify the operator and/or stop name BEFORE proceeding to Step 2. This is NON-NEGOTIABLE. A tram stop name uniquely and exclusively identifies its city.
 
-4. Weigh evidence by source reliability and mutual corroboration
-5. Prioritize evidence that multiple independent sources agree on
-6. If coordinates from multiple models cluster tightly (<50km), that's very strong evidence
-7. Country-level agreement across models is highly diagnostic
-8. OCR text (signs, plates, businesses) provides regional/local specificity
-9. Be SPECIFIC - neighborhood > city > region > country
-10. Confidence MUST reflect actual evidence strength, NOT be inflated
-11. Visual match evidence (source=visual_match) compares the query image against reference photos
-   of candidate locations. HIGH similarity is strong evidence for that specific location.
-   This is among the best evidence for distinguishing same-category candidates (e.g. two hotels in one city).
+### Step 1: Country Lock
+Identify country from hard indicators: license plate format, language/script on signs, road markings, electrical outlet types, vehicle types. If uncertain, list the top 2 candidates with reasons.
+
+### Step 2: City Discrimination (CRITICAL — MOST ERRORS OCCUR HERE)
+
+**⛔ THE CARDINAL RULE: When transit infrastructure is visible, the transit operator and/or stop name ALONE determines the city. You are NOT permitted to guess a city from regional proximity when transit evidence is available. A named tram stop exists in exactly ONE city — it does not exist in any other city, no matter how close.**
+
+**Transit identifiers are UNIQUE to their city:**
+- Stop names are exclusive: "Mühlburger Tor" exists ONLY in Karlsruhe — not in Pforzheim, Freiburg, Stuttgart, or anywhere else
+- Operator logos are exclusive: KVV = Karlsruhe (only), VAG = Freiburg (only), SSB = Stuttgart (only)
+- Route numbers and line designations are city-specific
+- Vehicle livery and stop design vary by transit authority
+
+**🚨 CRITICAL WARNING — GERMAN BADEN-WÜRTTEMBERG CITY DISAMBIGUATION:**
+Karlsruhe (KVV trams), Pforzheim (no tram system), Freiburg (VAG trams), and Stuttgart (SSB Stadtbahn) are DIFFERENT cities 30–120km apart with COMPLETELY DIFFERENT transit systems. They are NOT interchangeable. If you see KVV branding or a Karlsruhe tram stop name, the city IS Karlsruhe — full stop. If you see VAG branding, the city IS Freiburg. If no transit operator is identifiable, you do NOT have city-level evidence.
+
+**Other city-level discriminators (use ONLY when transit identifiers are unreadable):**
+- OCR text containing city or district names
+- Phone area codes (Karlsruhe=0721, Pforzheim=07231, Freiburg=0761, Stuttgart=0711)
+- Local business chains operating in only one city
+- Street name formats specific to a city
+
+**✅ MANDATORY VERIFICATION CHECKLIST — complete before finalizing city:**
+□ Did I extract a specific transit stop name? → If YES, city is determined. Stop here.
+□ Did I extract a transit operator logo/name? → If YES, city is determined. Stop here.
+□ Did I find OCR text containing a city or district name? → If YES, use that city.
+□ Am I choosing a city based only on regional proximity, coordinate clusters, or general impression? → If YES, STOP. You lack city-level evidence. Set confidence ≤0.5.
+
+### Step 3: Precision Downgrade Rule
+If you cannot find city-specific evidence (transit names, OCR with city/district, unique landmarks):
+- State explicitly which city-level evidence is MISSING
+- Choose the city with the MOST specific corroborating evidence, NOT the most famous one
+- LOWER your confidence to ≤0.5 — no city-specific evidence means no city-level confidence
+
+## EVIDENCE HIERARCHY (highest to lowest reliability)
+1. **Named transit infrastructure** (stop names, operator logos, route maps) — uniquely identifies city — ⛔ OVERRULES coordinates, hints, and all other evidence
+2. **OCR with place names** (street signs with district names, business addresses with city) — city/district level
+3. **Tight coordinate cluster** (<50km agreement across multiple models) — narrows region but does NOT identify city; cannot override transit evidence
+4. **Visual match** (high similarity to reference photos) — strong for specific locations
+5. **License plate region codes** — narrows to state/province only, NOT city
+6. **Country-level agreement** — confirms country but NOT city
+7. **User hint** — soft prior only; NEVER overrides transit or OCR evidence
+
+## CONFLICT RESOLUTION
+When evidence sources disagree:
+- A named tram stop or operator logo ALWAYS beats a coordinate cluster or user hint
+- Multiple models agreeing on coordinates does NOT override a transit operator identification — coordinates are approximate; transit names are exact
+- State the conflict explicitly in your reasoning
+- Follow the more specific, more reliable evidence
+- Lower confidence when sources conflict
+
+## CONFIDENCE CALIBRATION (STRICT — assigning high confidence without city-specific evidence is a critical error)
+- 0.9–1.0: Named transit stop AND/OR OCR with city/district name AND tight coordinate cluster AND visual match
+- 0.7–0.9: Transit operator or route identified AND coordinate agreement AND country-level corroboration
+- 0.5–0.7: Country certain, city inferred from regional evidence but NO city-specific text/transit — ⛔ MAXIMUM confidence when you lack city-specific identifiers
+- 0.3–0.5: Country certain, city guessed from general regional features with no specific evidence
+- 0.0–0.3: Country uncertain or multiple countries possible
+
+⛔ NEVER assign confidence ≥0.7 without a named transit stop, operator, or OCR text containing a city/district name. This is a hard rule — violations are errors.
 
 Return your answer as JSON:
 {{
-  "name": "Most specific location name (city, district if possible)",
+  "name": "Most specific location name (neighborhood/district if possible, then city)",
   "country": "Country name",
   "region": "State/province",
   "city": "City name",
   "latitude": float,
   "longitude": float,
-  "confidence": 0.0-1.0 (based on evidence strength, NOT random),
-  "reasoning": "Detailed explanation citing specific evidence",
-  "evidence_used": ["list of key evidence pieces that support this conclusion"]
+  "confidence": 0.0-1.0 (strictly per calibration scale above — no exceptions),
+  "transit_evidence": "Named transit stop/operator identified from image, or 'NONE — no city-specific transit evidence found'",
+  "ocr_evidence": "Key OCR text extracted from image, or 'NONE — no city-specific OCR evidence found'",
+  "reasoning": "Step-by-step: (1) Country evidence, (2) Transit identifiers extracted — name each one and state which city it maps to, (3) OCR text extracted and what it indicates, (4) City discrimination — cite specific evidence for chosen city vs alternatives, (5) Conflict resolution if applicable, (6) Confidence justification per calibration scale",
+  "evidence_used": ["list of key evidence pieces, each tagged as 'city-specific' or 'region-level' or 'country-level'"]
 }}
 """
 

@@ -1,0 +1,26 @@
+# Stage 1: evolve REASONING_PROMPT
+targets:
+  - type: slice
+    path: src/agents/reasoning_agent.py
+    name: reasoning_prompt
+    locator:
+      type: python_assignment
+      name: REASONING_PROMPT
+
+trace_sources:
+  - type: none
+
+task_sources:
+  - type: inline
+    tasks:
+      - description: "Improve street-level address finding (Karlsruhe hard_streets_v1)"
+        files:
+          - src/agents/reasoning_agent.py
+
+evaluator:
+  type: command
+  command: "./.venv/bin/python scripts/gepa_eval_command.py --candidate {candidate} --target reasoning"
+  timeout_s: 600
+  fail_score: 0.0
+
+reflection_model: "openrouter/z-ai/glm-5.1"
